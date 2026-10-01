@@ -29,6 +29,7 @@ permissions:
 jobs:
   build_platform:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
