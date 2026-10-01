@@ -129,6 +129,24 @@ class QueueShuffler<T> {
   /// The entry ids, in queue order, from before the Dart shuffle.
   List<String>? _orderBeforeShuffle;
 
+  /// The entry ids from before the current Dart shuffle, in queue order, or
+  /// `null` when the queue is not shuffled that way. This is what has to be
+  /// saved to be able to switch the shuffle off after a restart.
+  List<String>? get orderBeforeShuffle =>
+      _doneInDart ? _orderBeforeShuffle : null;
+
+  /// Takes over a Dart shuffle from an earlier run: [orderBeforeShuffle] is
+  /// what [QueueShuffler.orderBeforeShuffle] returned when it was saved. The
+  /// queue itself is already in its shuffled order; this only makes the app
+  /// report "shuffled" again and remember the order to go back to.
+  Future<void> restore(List<String> orderBeforeShuffle) {
+    return sync.exclusive(() async {
+      _doneInDart = true;
+      _orderBeforeShuffle = List.unmodifiable(orderBeforeShuffle);
+      port.publishShuffle(true);
+    });
+  }
+
   /// Switches shuffle on or off. [read] gives the current queue and [commit]
   /// receives the confirmed one after a Dart shuffle.
   ///

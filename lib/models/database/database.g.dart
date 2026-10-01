@@ -2928,13 +2928,13 @@ class $AudioPlayerStateTableTable extends AudioPlayerStateTable
               $AudioPlayerStateTableTable.$convertercollections);
   static const VerificationMeta _tracksMeta = const VerificationMeta('tracks');
   @override
-  late final GeneratedColumnWithTypeConverter<List<SpotubeTrackObject>, String>
-      tracks = GeneratedColumn<String>('tracks', aliasedName, false,
-              type: DriftSqlType.string,
-              requiredDuringInsert: false,
-              defaultValue: const Constant("[]"))
-          .withConverter<List<SpotubeTrackObject>>(
-              $AudioPlayerStateTableTable.$convertertracks);
+  late final GeneratedColumnWithTypeConverter<SavedQueue<SpotubeTrackObject>,
+      String> tracks = GeneratedColumn<String>('tracks', aliasedName, false,
+          type: DriftSqlType.string,
+          requiredDuringInsert: false,
+          defaultValue: const Constant("[]"))
+      .withConverter<SavedQueue<SpotubeTrackObject>>(
+          $AudioPlayerStateTableTable.$convertertracks);
   static const VerificationMeta _currentIndexMeta =
       const VerificationMeta('currentIndex');
   @override
@@ -3020,8 +3020,8 @@ class $AudioPlayerStateTableTable extends AudioPlayerStateTable
       const EnumNameConverter<PlaylistMode>(PlaylistMode.values);
   static TypeConverter<List<String>, String> $convertercollections =
       const StringListConverter();
-  static TypeConverter<List<SpotubeTrackObject>, String> $convertertracks =
-      const SpotubeTrackObjectListConverter();
+  static TypeConverter<SavedQueue<SpotubeTrackObject>, String>
+      $convertertracks = const SavedQueueConverter();
 }
 
 class AudioPlayerStateTableData extends DataClass
@@ -3031,7 +3031,11 @@ class AudioPlayerStateTableData extends DataClass
   final PlaylistMode loopMode;
   final bool shuffled;
   final List<String> collections;
-  final List<SpotubeTrackObject> tracks;
+
+  /// The saved queue: tracks with their entry ids, the groups and the shuffle
+  /// order. The column keeps its name and type from before Queue Groups; its
+  /// text is now a versioned object, and the old list of tracks still reads.
+  final SavedQueue<SpotubeTrackObject> tracks;
   final int currentIndex;
   const AudioPlayerStateTableData(
       {required this.id,
@@ -3085,7 +3089,8 @@ class AudioPlayerStateTableData extends DataClass
           .fromJson(serializer.fromJson<String>(json['loopMode'])),
       shuffled: serializer.fromJson<bool>(json['shuffled']),
       collections: serializer.fromJson<List<String>>(json['collections']),
-      tracks: serializer.fromJson<List<SpotubeTrackObject>>(json['tracks']),
+      tracks:
+          serializer.fromJson<SavedQueue<SpotubeTrackObject>>(json['tracks']),
       currentIndex: serializer.fromJson<int>(json['currentIndex']),
     );
   }
@@ -3099,7 +3104,7 @@ class AudioPlayerStateTableData extends DataClass
           $AudioPlayerStateTableTable.$converterloopMode.toJson(loopMode)),
       'shuffled': serializer.toJson<bool>(shuffled),
       'collections': serializer.toJson<List<String>>(collections),
-      'tracks': serializer.toJson<List<SpotubeTrackObject>>(tracks),
+      'tracks': serializer.toJson<SavedQueue<SpotubeTrackObject>>(tracks),
       'currentIndex': serializer.toJson<int>(currentIndex),
     };
   }
@@ -3110,7 +3115,7 @@ class AudioPlayerStateTableData extends DataClass
           PlaylistMode? loopMode,
           bool? shuffled,
           List<String>? collections,
-          List<SpotubeTrackObject>? tracks,
+          SavedQueue<SpotubeTrackObject>? tracks,
           int? currentIndex}) =>
       AudioPlayerStateTableData(
         id: id ?? this.id,
@@ -3174,7 +3179,7 @@ class AudioPlayerStateTableCompanion
   final Value<PlaylistMode> loopMode;
   final Value<bool> shuffled;
   final Value<List<String>> collections;
-  final Value<List<SpotubeTrackObject>> tracks;
+  final Value<SavedQueue<SpotubeTrackObject>> tracks;
   final Value<int> currentIndex;
   const AudioPlayerStateTableCompanion({
     this.id = const Value.absent(),
@@ -3223,7 +3228,7 @@ class AudioPlayerStateTableCompanion
       Value<PlaylistMode>? loopMode,
       Value<bool>? shuffled,
       Value<List<String>>? collections,
-      Value<List<SpotubeTrackObject>>? tracks,
+      Value<SavedQueue<SpotubeTrackObject>>? tracks,
       Value<int>? currentIndex}) {
     return AudioPlayerStateTableCompanion(
       id: id ?? this.id,
@@ -5834,7 +5839,7 @@ typedef $$AudioPlayerStateTableTableCreateCompanionBuilder
   required PlaylistMode loopMode,
   required bool shuffled,
   required List<String> collections,
-  Value<List<SpotubeTrackObject>> tracks,
+  Value<SavedQueue<SpotubeTrackObject>> tracks,
   Value<int> currentIndex,
 });
 typedef $$AudioPlayerStateTableTableUpdateCompanionBuilder
@@ -5844,7 +5849,7 @@ typedef $$AudioPlayerStateTableTableUpdateCompanionBuilder
   Value<PlaylistMode> loopMode,
   Value<bool> shuffled,
   Value<List<String>> collections,
-  Value<List<SpotubeTrackObject>> tracks,
+  Value<SavedQueue<SpotubeTrackObject>> tracks,
   Value<int> currentIndex,
 });
 
@@ -5876,8 +5881,8 @@ class $$AudioPlayerStateTableTableFilterComposer
           column: $table.collections,
           builder: (column) => ColumnWithTypeConverterFilters(column));
 
-  ColumnWithTypeConverterFilters<List<SpotubeTrackObject>,
-          List<SpotubeTrackObject>, String>
+  ColumnWithTypeConverterFilters<SavedQueue<SpotubeTrackObject>,
+          SavedQueue<SpotubeTrackObject>, String>
       get tracks => $composableBuilder(
           column: $table.tracks,
           builder: (column) => ColumnWithTypeConverterFilters(column));
@@ -5943,7 +5948,7 @@ class $$AudioPlayerStateTableTableAnnotationComposer
       $composableBuilder(
           column: $table.collections, builder: (column) => column);
 
-  GeneratedColumnWithTypeConverter<List<SpotubeTrackObject>, String>
+  GeneratedColumnWithTypeConverter<SavedQueue<SpotubeTrackObject>, String>
       get tracks => $composableBuilder(
           column: $table.tracks, builder: (column) => column);
 
@@ -5987,7 +5992,7 @@ class $$AudioPlayerStateTableTableTableManager extends RootTableManager<
             Value<PlaylistMode> loopMode = const Value.absent(),
             Value<bool> shuffled = const Value.absent(),
             Value<List<String>> collections = const Value.absent(),
-            Value<List<SpotubeTrackObject>> tracks = const Value.absent(),
+            Value<SavedQueue<SpotubeTrackObject>> tracks = const Value.absent(),
             Value<int> currentIndex = const Value.absent(),
           }) =>
               AudioPlayerStateTableCompanion(
@@ -6005,7 +6010,7 @@ class $$AudioPlayerStateTableTableTableManager extends RootTableManager<
             required PlaylistMode loopMode,
             required bool shuffled,
             required List<String> collections,
-            Value<List<SpotubeTrackObject>> tracks = const Value.absent(),
+            Value<SavedQueue<SpotubeTrackObject>> tracks = const Value.absent(),
             Value<int> currentIndex = const Value.absent(),
           }) =>
               AudioPlayerStateTableCompanion.insert(

@@ -15,6 +15,7 @@ import 'package:spotube/provider/server/track_sources.dart';
 import 'package:spotube/services/audio_player/audio_player.dart';
 import 'package:spotube/services/audio_player/queue_groups.dart';
 import 'package:spotube/services/audio_player/queue_operations.dart';
+import 'package:spotube/services/audio_player/queue_persistence.dart';
 import 'package:spotube/services/audio_player/queue_shuffle.dart';
 import 'package:spotube/services/audio_player/queue_sync.dart';
 import 'package:spotube/services/logger/logger.dart';
@@ -55,6 +56,18 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   QueueSnapshot<SpotubeTrackObject> get _snapshot =>
       QueueSnapshot(_grouped, state.currentIndex);
 
+  /// What is saved of the queue: the entries with their ids, the groups, and
+  /// the order to go back to when a shuffle done in Dart is switched off.
+  /// Every write of the queue saves all of it together.
+  SavedQueue<SpotubeTrackObject> get _savedQueue {
+    final queue = _grouped;
+    return SavedQueue(
+      entries: queue.entries,
+      groups: queue.groups,
+      shuffleOrder: _shuffler.orderBeforeShuffle,
+    );
+  }
+
   /// Sends queue changes to the player and mirrors the player back.
   late final GroupedQueueSync<SpotubeTrackObject> _sync = GroupedQueueSync(
     port: _AudioPlayerPort(),
@@ -81,7 +94,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       // mpv did not shuffle, so it did not report the new order either.
       await _updatePlayerState(
         AudioPlayerStateTableCompanion(
-          tracks: Value(state.tracks),
+          tracks: Value(_savedQueue),
           currentIndex: Value(max(state.currentIndex, 0)),
         ),
       );
@@ -124,7 +137,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
               loopMode: audioPlayer.loopMode,
               shuffled: audioPlayer.isShuffled,
               collections: <String>[],
-              tracks: const Value(<SpotubeTrackObject>[]),
+              tracks: const Value(SavedQueue<SpotubeTrackObject>.empty()),
               currentIndex: const Value(0),
               id: const Value(0),
             ),
@@ -137,22 +150,43 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       await audioPlayer.setShuffle(playerState.shuffled);
     }
 
-    final tracks = playerState.tracks;
-    final currentIndex = playerState.currentIndex;
+    final saved = playerState.tracks;
+    final tracks = saved.tracks;
+    if (saved.issues.isNotEmpty) {
+      AppLogger.log.w(
+        "Saved queue was not fully readable: ${saved.issues.join('; ')}",
+      );
+    }
+    // Tracks that could not be read are left out, which moves the ones after
+    // them up; the playing track stays the same one.
+    final currentIndex = remapCurrentIndex(
+      playerState.currentIndex,
+      saved.droppedPositions,
+      tracks.length,
+    );
 
     if (tracks.isEmpty && state.tracks.isNotEmpty) {
       await _updatePlayerState(
         AudioPlayerStateTableCompanion(
-          tracks: Value(state.tracks),
+          tracks: Value(_savedQueue),
           currentIndex: Value(currentIndex),
         ),
       );
     } else if (tracks.isNotEmpty) {
-      // Identities only live as long as the app: the saved queue is a plain
-      // list of tracks, so every restored track becomes a new entry.
+      // The saved queue carries its entry ids and groups; a queue saved before
+      // Queue Groups has neither, and gets new ids and no groups.
       state = state
-          .withEntries(createEntries(tracks, _newEntryId))
-          .copyWith(currentIndex: currentIndex, groups: []);
+          .withGroupedQueue(saved.queue)
+          .copyWith(currentIndex: currentIndex);
+
+      // A queue that was shuffled in Dart is still in its shuffled order; this
+      // makes it report "shuffled" again and remember how to unshuffle it. It
+      // comes before the queue is opened so that the writes the opening causes
+      // already save the shuffle order, and so that mpv resetting its own flag
+      // while opening is not what the app reports.
+      final shuffleOrder = saved.shuffleOrder;
+      if (shuffleOrder != null) await _shuffler.restore(shuffleOrder);
+
       await audioPlayer.openPlaylist(
         tracks.asMediaList(),
         initialIndex: currentIndex,
@@ -269,7 +303,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
           await _updatePlayerState(
             AudioPlayerStateTableCompanion(
               currentIndex: Value(state.currentIndex),
-              tracks: Value(state.tracks),
+              tracks: Value(_savedQueue),
             ),
           );
         } catch (e, stack) {
@@ -365,7 +399,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: Value(max(state.currentIndex, 0)),
       ),
     );
@@ -386,7 +420,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: Value(max(state.currentIndex, 0)),
       ),
     );
@@ -407,7 +441,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: Value(max(state.currentIndex, 0)),
       ),
     );
@@ -428,7 +462,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: Value(max(state.currentIndex, 0)),
       ),
     );
@@ -457,7 +491,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: Value(max(state.currentIndex, 0)),
       ),
     );
@@ -525,7 +559,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: Value(max(state.currentIndex, 0)),
       ),
     );
@@ -600,7 +634,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       if (!sameEntryOrder(from.queue.entries, target.entries)) {
         await _updatePlayerState(
           AudioPlayerStateTableCompanion(
-            tracks: Value(state.tracks),
+            tracks: Value(_savedQueue),
             currentIndex: Value(max(state.currentIndex, 0)),
           ),
         );
@@ -695,7 +729,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     _shuffler.reset();
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
-        tracks: Value(state.tracks),
+        tracks: Value(_savedQueue),
         currentIndex: const Value(0),
         collections: const Value(<String>[]),
         loopMode: const Value(PlaylistMode.none),

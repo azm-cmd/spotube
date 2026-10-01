@@ -14,6 +14,7 @@ import 'package:spotube/models/database/database.steps.dart';
 import 'package:spotube/models/lyrics.dart';
 import 'package:spotube/models/metadata/market.dart';
 import 'package:spotube/models/metadata/metadata.dart';
+import 'package:spotube/services/audio_player/queue_persistence.dart';
 import 'package:spotube/services/kv_store/encrypted_kv_store.dart';
 import 'package:spotube/services/kv_store/kv_store.dart';
 import 'package:spotube/services/sourced_track/enums.dart';
@@ -25,6 +26,7 @@ import 'package:spotube/services/youtube_engine/youtube_explode_engine.dart';
 import 'package:spotube/services/youtube_engine/yt_dlp_engine.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:sqlite3_flutter_libs/sqlite3_flutter_libs.dart';
+import 'package:uuid/uuid.dart';
 
 part 'database.g.dart';
 
@@ -63,6 +65,9 @@ part 'typeconverters/subtitle.dart';
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
+
+  @visibleForTesting
+  AppDatabase.forTesting(super.executor);
 
   @override
   int get schemaVersion => 8;
