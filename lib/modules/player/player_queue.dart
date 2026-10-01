@@ -16,8 +16,14 @@ import 'package:spotube/extensions/constrains.dart';
 import 'package:spotube/extensions/context.dart';
 import 'package:spotube/hooks/controllers/use_auto_scroll_controller.dart';
 import 'package:spotube/models/metadata/metadata.dart';
+import 'package:spotube/modules/player/queue_groups/group_title_dialog.dart';
+import 'package:spotube/modules/player/queue_groups/queue_group_actions.dart';
+import 'package:spotube/modules/player/queue_groups/queue_group_strings.dart';
+import 'package:spotube/modules/player/queue_groups/queue_rows.dart';
+import 'package:spotube/modules/player/queue_groups/queue_rows_sliver.dart';
 import 'package:spotube/provider/audio_player/audio_player.dart';
 import 'package:spotube/provider/audio_player/state.dart';
+import 'package:spotube/services/logger/logger.dart';
 
 class PlayerQueue extends HookConsumerWidget {
   final bool floating;
@@ -28,6 +34,10 @@ class PlayerQueue extends HookConsumerWidget {
   final Future<void> Function(int oldIndex, int newIndex) onReorder;
   final Future<void> Function() onStop;
 
+  /// What the queue can do with groups. `null` for a queue that has none (the
+  /// one of a remote player): it is then shown and edited as a flat list.
+  final QueueGroupActions? groupActions;
+
   const PlayerQueue({
     this.floating = true,
     required this.playlist,
@@ -35,6 +45,7 @@ class PlayerQueue extends HookConsumerWidget {
     required this.onRemove,
     required this.onReorder,
     required this.onStop,
+    this.groupActions,
     super.key,
   });
 
@@ -46,7 +57,8 @@ class PlayerQueue extends HookConsumerWidget {
   })  : onJump = notifier.jumpToTrack,
         onRemove = notifier.removeTrack,
         onReorder = notifier.moveTrack,
-        onStop = notifier.stop;
+        onStop = notifier.stop,
+        groupActions = QueueGroupActions.fromNotifier(notifier);
 
   @override
   Widget build(BuildContext context, ref) {
@@ -59,15 +71,20 @@ class PlayerQueue extends HookConsumerWidget {
 
     final tracks = playlist.tracks;
 
+    // Tracks with their place in the queue, so a row can tell which copy of a
+    // track it is.
     final filteredTracks = useMemoized(
       () {
+        final indexed = [
+          for (var i = 0; i < tracks.length; i++) (i, tracks[i]),
+        ];
         if (searchText.value.isEmpty) {
-          return tracks;
+          return indexed;
         }
-        return tracks
+        return indexed
             .map((e) => (
                   weightedRatio(
-                    '${e.name} - ${e.artists.asString()}',
+                    '${e.$2.name} - ${e.$2.artists.asString()}',
                     searchText.value,
                   ),
                   e
@@ -79,6 +96,75 @@ class PlayerQueue extends HookConsumerWidget {
       },
       [tracks, searchText.value],
     );
+
+    final actions = groupActions;
+
+    // The queue with its groups, when this is a queue that has them: it needs
+    // the player's actions and an entry id for every track.
+    final grouped = useMemoized(
+      () => actions == null || playlist.entryIds.length != tracks.length
+          ? null
+          : playlist.groupedQueue,
+      [actions == null, playlist.tracks, playlist.entryIds, playlist.groups],
+    );
+
+    final rows = useMemoized(
+      () => grouped == null
+          ? null
+          : buildQueueRows(grouped, currentIndex: playlist.currentIndex),
+      [grouped, playlist.currentIndex],
+    );
+
+    // The entries chosen for a new group; null when not choosing.
+    final selection = useState<Set<String>?>(null);
+
+    final isFiltering = isSearching.value || searchText.value.isNotEmpty;
+    final showGroups = rows != null && !isFiltering;
+
+    Future<void> guarded(Future<void> Function() action) async {
+      try {
+        await action();
+      } catch (e, stack) {
+        AppLogger.reportError(e, stack);
+      }
+    }
+
+    void onMove(QueueMove move) {
+      if (actions == null) return;
+      guarded(
+        () => applyQueueMove(
+          move,
+          actions: actions,
+          hasGroups: grouped!.groups.isNotEmpty,
+          onReorder: onReorder,
+        ),
+      );
+    }
+
+    // Only loose entries that are still in the queue can be grouped.
+    Set<String> chosenEntries() {
+      final chosen = selection.value;
+      if (chosen == null || grouped == null) return const {};
+      return {
+        for (final entry in grouped.ungroupedEntries)
+          if (chosen.contains(entry.id)) entry.id,
+      };
+    }
+
+    Future<void> createGroupFromSelection() async {
+      final chosen = chosenEntries();
+      if (chosen.length < 2) return;
+      final title = await showGroupTitleDialog(
+        context,
+        heading: QueueGroupStrings.create,
+        confirmLabel: QueueGroupStrings.create,
+      );
+      if (title == null) return;
+      await guarded(
+        () => groupActions!.createGroup(title: title, entryIds: chosen),
+      );
+      selection.value = null;
+    }
 
     if (tracks.isEmpty) {
       return const NotFound();
@@ -157,6 +243,25 @@ class PlayerQueue extends HookConsumerWidget {
                             },
                           ),
                         if (!isSearching.value) ...[
+                          if (showGroups) ...[
+                            const SizedBox(width: 10),
+                            Tooltip(
+                              tooltip: const TooltipContainer(
+                                child: Text(QueueGroupStrings.groupTracks),
+                              ).call,
+                              child: IconButton(
+                                key: const Key('queue-group-select-toggle'),
+                                variance: selection.value != null
+                                    ? ButtonVariance.secondary
+                                    : ButtonVariance.outline,
+                                icon: const Icon(SpotubeIcons.selectionCheck),
+                                onPressed: () {
+                                  selection.value =
+                                      selection.value == null ? {} : null;
+                                },
+                              ),
+                            ),
+                          ],
                           const SizedBox(width: 10),
                           Tooltip(
                             tooltip: TooltipContainer(
@@ -177,6 +282,12 @@ class PlayerQueue extends HookConsumerWidget {
                       ],
                     ),
                   const Divider(),
+                  if (showGroups && selection.value != null)
+                    _SelectionBar(
+                      count: chosenEntries().length,
+                      onCancel: () => selection.value = null,
+                      onCreate: createGroupFromSelection,
+                    ),
                   Expanded(
                     child: InterScrollbar(
                       controller: controller,
@@ -184,49 +295,117 @@ class PlayerQueue extends HookConsumerWidget {
                         controller: controller,
                         slivers: [
                           const SliverGap(10),
-                          SliverReorderableList(
-                            onReorder: onReorder,
-                            itemCount: filteredTracks.length,
-                            onReorderStart: (index) {
-                              HapticFeedback.selectionClick();
-                            },
-                            onReorderEnd: (index) {
-                              HapticFeedback.selectionClick();
-                            },
-                            itemBuilder: (context, i) {
-                              final track = filteredTracks.elementAt(i);
-                              return AutoScrollTag(
-                                key: ValueKey<int>(i),
-                                controller: controller,
-                                index: i,
-                                child: TrackTile(
+                          if (showGroups)
+                            QueueRowsSliver<SpotubeTrackObject>(
+                              rows: rows,
+                              scrollController: controller,
+                              onMove: onMove,
+                              selection: selection.value,
+                              onSelectionChanged: (entryId, selected) {
+                                final chosen = {...?selection.value};
+                                selected
+                                    ? chosen.add(entryId)
+                                    : chosen.remove(entryId);
+                                selection.value = chosen;
+                              },
+                              onSetCollapsed: (groupId, collapsed) => guarded(
+                                () => actions!.setCollapsed(groupId, collapsed),
+                              ),
+                              onRenameGroup: (groupId, title) => guarded(
+                                () => actions!.renameGroup(groupId, title),
+                              ),
+                              onUngroup: (groupId) =>
+                                  guarded(() => actions!.ungroup(groupId)),
+                              entryBuilder: (context, row, chrome) {
+                                final onSelected = chrome.onSelectedChanged;
+                                return TrackTile(
                                   playlist: playlist,
-                                  index: i,
-                                  track: track,
+                                  index: row.flatIndex,
+                                  track: row.entry.track,
+                                  isActive: row.isPlaying,
+                                  queueEntryId: row.entry.id,
+                                  selected: chrome.selected ?? false,
+                                  onChanged: onSelected == null
+                                      ? null
+                                      : (value) => onSelected(value ?? false),
                                   onTap: () async {
-                                    if (playlist.activeTrack?.id == track.id) {
+                                    final chosen = selection.value;
+                                    if (chosen != null) {
+                                      onSelected?.call(
+                                        !chosen.contains(row.entry.id),
+                                      );
                                       return;
                                     }
-                                    await onJump(track);
+                                    if (row.isPlaying) return;
+                                    await actions!.jumpToEntry(row.entry.id);
                                   },
                                   leadingActions: [
-                                    if (!isSearching.value &&
-                                        searchText.value.isEmpty)
-                                      Padding(
-                                        padding:
-                                            const EdgeInsets.only(left: 8.0),
-                                        child: ReorderableDragStartListener(
-                                          index: i,
-                                          child: const Icon(
-                                            SpotubeIcons.dragHandle,
+                                    if (chrome.dragHandle != null)
+                                      chrome.dragHandle!,
+                                  ],
+                                );
+                              },
+                            )
+                          else
+                            SliverReorderableList(
+                              onReorder: onReorder,
+                              itemCount: filteredTracks.length,
+                              onReorderStart: (index) {
+                                HapticFeedback.selectionClick();
+                              },
+                              onReorderEnd: (index) {
+                                HapticFeedback.selectionClick();
+                              },
+                              itemBuilder: (context, i) {
+                                final (flatIndex, track) = filteredTracks[i];
+                                // A queue with entry ids knows which copy of a
+                                // track is playing; a remote one only has ids.
+                                final entryId = grouped == null
+                                    ? null
+                                    : playlist.entryIds[flatIndex];
+                                final isActive = entryId == null
+                                    ? null
+                                    : flatIndex == playlist.currentIndex;
+                                return AutoScrollTag(
+                                  key: ValueKey<int>(i),
+                                  controller: controller,
+                                  index: i,
+                                  child: TrackTile(
+                                    playlist: playlist,
+                                    index: i,
+                                    track: track,
+                                    isActive: isActive,
+                                    queueEntryId: entryId,
+                                    onTap: () async {
+                                      if (entryId != null) {
+                                        if (isActive == true) return;
+                                        await actions!.jumpToEntry(entryId);
+                                        return;
+                                      }
+                                      if (playlist.activeTrack?.id ==
+                                          track.id) {
+                                        return;
+                                      }
+                                      await onJump(track);
+                                    },
+                                    leadingActions: [
+                                      if (!isSearching.value &&
+                                          searchText.value.isEmpty)
+                                        Padding(
+                                          padding:
+                                              const EdgeInsets.only(left: 8.0),
+                                          child: ReorderableDragStartListener(
+                                            index: i,
+                                            child: const Icon(
+                                              SpotubeIcons.dragHandle,
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
                           const SliverSafeArea(sliver: SliverGap(100)),
                         ],
                       ),
@@ -243,14 +422,69 @@ class PlayerQueue extends HookConsumerWidget {
           child: IconButton.secondary(
             icon: const Icon(SpotubeIcons.angleDown),
             onPressed: () {
+              // With groups, the playing track may be hidden in a collapsed
+              // group: scroll to the row that shows it.
               controller.scrollToIndex(
-                playlist.currentIndex,
+                showGroups
+                    ? rowIndexOfFlatIndex(rows, playlist.currentIndex) ?? 0
+                    : playlist.currentIndex,
                 preferPosition: AutoScrollPosition.middle,
               );
             },
           ),
         )
       ],
+    );
+  }
+}
+
+/// The bar shown while choosing tracks to group.
+class _SelectionBar extends StatelessWidget {
+  final int count;
+  final VoidCallback onCancel;
+  final VoidCallback onCreate;
+
+  const _SelectionBar({
+    required this.count,
+    required this.onCancel,
+    required this.onCreate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('queue-group-selection-bar'),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              count < 2
+                  ? QueueGroupStrings.selectTracks
+                  : QueueGroupStrings.selected(count),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const Gap(8),
+          Button.ghost(
+            key: const Key('queue-group-selection-cancel'),
+            onPressed: onCancel,
+            child: const Text(QueueGroupStrings.cancel),
+          ),
+          const Gap(8),
+          Button.primary(
+            key: const Key('queue-group-selection-create'),
+            enabled: count >= 2,
+            onPressed: onCreate,
+            child: Text(
+              count >= 2
+                  ? QueueGroupStrings.groupSelected(count)
+                  : QueueGroupStrings.create,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

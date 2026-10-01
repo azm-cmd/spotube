@@ -10,6 +10,7 @@ import 'package:spotube/components/ui/button_tile.dart';
 import 'package:spotube/extensions/constrains.dart';
 import 'package:spotube/extensions/context.dart';
 import 'package:spotube/models/metadata/metadata.dart';
+import 'package:spotube/provider/audio_player/audio_player.dart';
 import 'package:spotube/provider/track_options/track_options_provider.dart';
 
 /// [track] must be a [SpotubeFullTrackObject] or [SpotubeLocalTrackObject]
@@ -20,6 +21,10 @@ class TrackOptions extends HookConsumerWidget {
   final Widget? icon;
   final VoidCallback? onTapItem;
 
+  /// Set when the options belong to a row of the player queue, so that the
+  /// action applies to that occurrence of the track.
+  final String? queueEntryId;
+
   const TrackOptions({
     super.key,
     required this.track,
@@ -27,6 +32,7 @@ class TrackOptions extends HookConsumerWidget {
     this.playlistId,
     this.icon,
     this.onTapItem,
+    this.queueEntryId,
   }) : assert(
           track is SpotubeFullTrackObject || track is SpotubeLocalTrackObject,
           "Track must be a SpotubeFullTrackObject, SpotubeLocalTrackObject",
@@ -48,6 +54,17 @@ class TrackOptions extends HookConsumerWidget {
       :progressNotifier
     ) = ref.watch(trackOptionsStateProvider(track));
     final isLocalTrack = track is SpotubeLocalTrackObject;
+    final entryId = queueEntryId;
+    final isActiveEntry = entryId == null
+        ? isActiveTrack
+        : ref.watch(
+            audioPlayerProvider.select(
+              (s) =>
+                  s.currentIndex >= 0 &&
+                  s.currentIndex < s.entryIds.length &&
+                  s.entryIds[s.currentIndex] == entryId,
+            ),
+          );
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -127,10 +144,11 @@ class TrackOptions extends HookConsumerWidget {
                 context,
                 TrackOptionValue.removeFromQueue,
                 playlistId,
+                queueEntryId: queueEntryId,
               );
               onTapItem?.call();
             },
-            enabled: !isActiveTrack,
+            enabled: !isActiveEntry,
             leading: const Icon(SpotubeIcons.queueRemove),
             title: Text(context.l10n.remove_from_queue),
           ),

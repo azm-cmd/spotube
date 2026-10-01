@@ -586,6 +586,14 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     await audioPlayer.jumpTo(index);
   }
 
+  /// Plays the queue entry [entryId]. Unlike [jumpToTrack] this reaches the
+  /// right copy when a track is queued more than once.
+  Future<void> jumpToEntry(String entryId) async {
+    final index = state.entryIds.indexOf(entryId);
+    if (index == -1) return;
+    await audioPlayer.jumpTo(index);
+  }
+
   Future<void> moveTrack(int oldIndex, int newIndex) async {
     if (!canMoveEntry(state.tracks.length, oldIndex, newIndex)) return;
 
@@ -629,16 +637,15 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         commit: _commitSnapshot,
       );
 
-      // Only the order of the queue is saved, so a change that left the order
-      // alone (rename, collapse, ungroup) has nothing to write.
-      if (!sameEntryOrder(from.queue.entries, target.entries)) {
-        await _updatePlayerState(
-          AudioPlayerStateTableCompanion(
-            tracks: Value(_savedQueue),
-            currentIndex: Value(max(state.currentIndex, 0)),
-          ),
-        );
-      }
+      // Groups are part of what is saved, so a change that left the order
+      // alone (rename, collapse, ungroup, a group made of entries that were
+      // already next to each other) still has something to write.
+      await _updatePlayerState(
+        AudioPlayerStateTableCompanion(
+          tracks: Value(_savedQueue),
+          currentIndex: Value(max(state.currentIndex, 0)),
+        ),
+      );
     });
   }
 

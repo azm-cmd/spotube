@@ -48,6 +48,14 @@ class TrackTile extends HookConsumerWidget {
 
   final List<Widget>? leadingActions;
 
+  /// Whether this row is the playing one. When null, the row is the playing
+  /// one if its track is the active track, which cannot tell apart two copies
+  /// of the same track; the player queue passes the answer by position.
+  final bool? isActive;
+
+  /// Set by the player queue: the queue entry this row shows.
+  final String? queueEntryId;
+
   const TrackTile({
     super.key,
     this.index,
@@ -60,6 +68,8 @@ class TrackTile extends HookConsumerWidget {
     this.userPlaylist = false,
     this.playlistId,
     this.leadingActions,
+    this.isActive,
+    this.queueEntryId,
   });
 
   @override
@@ -70,7 +80,7 @@ class TrackTile extends HookConsumerWidget {
 
     final isLoading = useState(false);
 
-    final isPlaying = playlist.activeTrack?.id == track.id;
+    final isPlaying = isActive ?? playlist.activeTrack?.id == track.id;
 
     final isSelected = isPlaying || isLoading.value;
 
@@ -95,6 +105,7 @@ class TrackTile extends HookConsumerWidget {
             track,
             userPlaylist: userPlaylist,
             playlistId: playlistId,
+            queueEntryId: queueEntryId,
           );
         },
         child: HoverBuilder(
@@ -315,6 +326,7 @@ class TrackTile extends HookConsumerWidget {
                       track: track,
                       userPlaylist: userPlaylist,
                       playlistId: playlistId,
+                      queueEntryId: queueEntryId,
                     );
                   },
                 ),

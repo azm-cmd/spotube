@@ -136,8 +136,11 @@ class TrackOptionsActions {
   Future<void> action(
     BuildContext context,
     TrackOptionValue value,
-    String? playlistId,
-  ) async {
+    String? playlistId, {
+    // The queue entry the options were opened for, when they come from the
+    // queue: removing it must remove that occurrence, not the first copy.
+    String? queueEntryId,
+  }) async {
     switch (value) {
       case TrackOptionValue.album:
         await context.navigateTo(
@@ -184,7 +187,11 @@ class TrackOptionsActions {
         }
         break;
       case TrackOptionValue.removeFromQueue:
-        playback.removeTrack(track.id);
+        if (queueEntryId != null) {
+          playback.removeEntries([queueEntryId]);
+        } else {
+          playback.removeTrack(track.id);
+        }
 
         if (context.mounted) {
           showToast(

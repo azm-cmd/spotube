@@ -15,11 +15,15 @@ class TrackOptionsButton extends HookConsumerWidget {
   final SpotubeTrackObject track;
   final bool userPlaylist;
   final String? playlistId;
+
+  /// See [TrackOptions.queueEntryId].
+  final String? queueEntryId;
   const TrackOptionsButton({
     super.key,
     required this.track,
     required this.userPlaylist,
     this.playlistId,
+    this.queueEntryId,
   });
 
   static OverlayCompleter<dynamic> showOptions(
@@ -28,6 +32,7 @@ class TrackOptionsButton extends HookConsumerWidget {
     SpotubeTrackObject track, {
     bool userPlaylist = false,
     String? playlistId,
+    String? queueEntryId,
   }) {
     return showPopover(
       context: context,
@@ -42,6 +47,7 @@ class TrackOptionsButton extends HookConsumerWidget {
               track: track,
               playlistId: playlistId,
               userPlaylist: userPlaylist,
+              queueEntryId: queueEntryId,
               onTapItem: () {
                 closeOverlay(context);
               },
@@ -84,6 +90,7 @@ class TrackOptionsButton extends HookConsumerWidget {
             track,
             userPlaylist: userPlaylist,
             playlistId: playlistId,
+            queueEntryId: queueEntryId,
           );
         } else {
           openDrawer(
@@ -136,6 +143,7 @@ class TrackOptionsButton extends HookConsumerWidget {
                       track: track,
                       userPlaylist: userPlaylist,
                       playlistId: playlistId,
+                      queueEntryId: queueEntryId,
                       onTapItem: () {
                         closeDrawer(context);
                       },
