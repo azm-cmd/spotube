@@ -12,7 +12,15 @@
 ///    [RangeError] when the index is invalid, because that is a caller bug.
 ///    Operations on a set of indexes ([removeIndexes], [validIndexes]) ignore
 ///    indexes that are out of bounds.
+///
+/// Queue entry identity: a track can be in the queue more than once, so the
+/// track id cannot tell two occurrences apart. A [QueueEntry] pairs a track
+/// with an id that belongs to that *occurrence* alone. The helpers above work
+/// on any list, so they apply to `List<QueueEntry<T>>` unchanged and the
+/// identity travels with the entry through moves, insertions and removals.
 library;
+
+import 'dart:collection';
 
 /// A half-open range `[start, end)` of positions inside a queue.
 class QueueRange {
@@ -20,8 +28,8 @@ class QueueRange {
   final int end;
 
   const QueueRange(this.start, this.end)
-    : assert(start >= 0, 'start must not be negative'),
-      assert(end >= start, 'end must not be before start');
+      : assert(start >= 0, 'start must not be negative'),
+        assert(end >= start, 'end must not be before start');
 
   /// Number of positions covered by the range.
   int get length => end - start;
@@ -144,28 +152,99 @@ List<T> moveEntry<T>(List<T> items, int from, int to) {
   return result;
 }
 
-/// Rebuilds the order of [items] to follow [orderedKeys].
+/// Produces an identity that has never been handed out before.
+typedef QueueEntryIdGenerator = String Function();
+
+/// One occurrence of a track in the queue.
 ///
-/// Used to mirror the player's playlist order (after a shuffle or a move) back
-/// onto the app's own track objects: for every key, in order, the item with
-/// that key is emitted.
-///
-/// Known limitation (kept on purpose, see `AudioPlayerNotifier`): items are
-/// matched by key only. When several items share a key, every occurrence of
-/// that key resolves to the *first* such item. Keys without a matching item
-/// are skipped, and items whose key never appears are dropped.
-List<T> reorderByKeys<T, K>(
-  List<T> items,
-  Iterable<K> orderedKeys,
-  K Function(T item) keyOf,
+/// [id] identifies the *occurrence*, never the track: two copies of the same
+/// track are two entries with different ids. It is unrelated to the track id
+/// and to any grouping, and it never changes while the entry stays in the
+/// queue, whatever happens to its position.
+class QueueEntry<T> {
+  final String id;
+  final T track;
+
+  const QueueEntry(this.id, this.track);
+
+  @override
+  bool operator ==(Object other) =>
+      other is QueueEntry<T> && other.id == id && other.track == track;
+
+  @override
+  int get hashCode => Object.hash(id, track);
+
+  @override
+  String toString() => 'QueueEntry($id, $track)';
+}
+
+/// Wraps every track in a new entry with a fresh identity from [nextId],
+/// keeping the order of [tracks].
+List<QueueEntry<T>> createEntries<T>(
+  Iterable<T> tracks,
+  QueueEntryIdGenerator nextId,
 ) {
-  final firstByKey = <K, T>{};
-  for (final item in items) {
-    firstByKey.putIfAbsent(keyOf(item), () => item);
+  return [for (final track in tracks) QueueEntry(nextId(), track)];
+}
+
+/// Pairs [tracks] and [ids] that are stored as two parallel lists.
+///
+/// Throws an [ArgumentError] when the lists differ in length, as that means
+/// the identities no longer describe the tracks.
+List<QueueEntry<T>> pairEntries<T>(List<T> tracks, List<String> ids) {
+  if (tracks.length != ids.length) {
+    throw ArgumentError(
+      'Cannot pair ${tracks.length} tracks with ${ids.length} entry ids',
+    );
+  }
+  return [
+    for (var i = 0; i < tracks.length; i++) QueueEntry(ids[i], tracks[i]),
+  ];
+}
+
+/// Whether no two [entries] share an id.
+bool hasUniqueEntryIds(Iterable<QueueEntry<Object?>> entries) {
+  final ids = <String>{};
+  return entries.every((entry) => ids.add(entry.id));
+}
+
+/// Position of the entry with [entryId], or `-1` when it is not in [entries].
+int indexOfEntry<T>(List<QueueEntry<T>> entries, String entryId) {
+  return entries.indexWhere((entry) => entry.id == entryId);
+}
+
+/// Rebuilds the order of [entries] to follow [orderedKeys], the keys of the
+/// queue as the player reports it.
+///
+/// Used to mirror the player's playlist order (after a shuffle or any other
+/// change the player made on its own) back onto the app's entries. Entries are
+/// matched by `keyOf(entry.track)`, and every entry is used at most once: the
+/// n-th time a key shows up in [orderedKeys] it claims the n-th entry that has
+/// that key. Copies of the same track therefore stay separate entries, keep
+/// their ids, and keep their order relative to each other.
+///
+/// Keys without a matching entry are skipped; entries whose key does not
+/// appear (often enough) in [orderedKeys] are dropped.
+///
+/// The player only sees keys, so it cannot report *which* copy of a track it
+/// moved. Moves the app makes itself must be applied to the entries first (see
+/// [moveEntry]) so that this function only has to confirm them.
+List<QueueEntry<T>> reconcileEntries<T, K>(
+  List<QueueEntry<T>> entries,
+  Iterable<K> orderedKeys,
+  K Function(T track) keyOf,
+) {
+  final pending = <K, Queue<QueueEntry<T>>>{};
+  for (final entry in entries) {
+    pending.putIfAbsent(keyOf(entry.track), Queue.new).add(entry);
   }
 
-  return [
-    for (final key in orderedKeys)
-      if (firstByKey.containsKey(key)) firstByKey[key] as T,
-  ];
+  final result = <QueueEntry<T>>[];
+  for (final key in orderedKeys) {
+    final candidates = pending[key];
+    if (candidates != null && candidates.isNotEmpty) {
+      result.add(candidates.removeFirst());
+    }
+  }
+  return result;
 }

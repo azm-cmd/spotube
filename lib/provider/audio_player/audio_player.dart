@@ -15,9 +15,32 @@ import 'package:spotube/provider/server/track_sources.dart';
 import 'package:spotube/services/audio_player/audio_player.dart';
 import 'package:spotube/services/audio_player/queue_operations.dart';
 import 'package:spotube/services/logger/logger.dart';
+import 'package:uuid/uuid.dart';
 
 class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
+  static const _uuid = Uuid();
+
   BlackListNotifier get _blacklist => ref.read(blacklistProvider.notifier);
+
+  /// A new identity for a queue occurrence. Not derived from the track, so the
+  /// same track queued twice gets two different ids.
+  String _newEntryId() => _uuid.v4();
+
+  /// The queue as entries: every track together with its occurrence id.
+  ///
+  /// [AudioPlayerState.entryIds] is kept aligned with the tracks by every
+  /// method below. Should that ever not hold, identities are issued afresh
+  /// instead of failing in the middle of playback.
+  List<QueueEntry<SpotubeTrackObject>> get _entries {
+    if (state.entryIds.length != state.tracks.length) {
+      AppLogger.log.w(
+        "Queue entry ids out of sync with tracks. Re-issuing... "
+        "Ids: ${state.entryIds.length}, tracks: ${state.tracks.length}",
+      );
+      return createEntries(state.tracks, _newEntryId);
+    }
+    return pairEntries(state.tracks, state.entryIds);
+  }
 
   void _assertAllowedTracks(Iterable<SpotubeTrackObject> tracks) {
     assert(
@@ -73,10 +96,11 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         ),
       );
     } else if (tracks.isNotEmpty) {
-      state = state.copyWith(
-        tracks: tracks,
-        currentIndex: currentIndex,
-      );
+      // Identities only live as long as the app: the saved queue is a plain
+      // list of tracks, so every restored track becomes a new entry.
+      state = state
+          .withEntries(createEntries(tracks, _newEntryId))
+          .copyWith(currentIndex: currentIndex);
       await audioPlayer.openPlaylist(
         tracks.asMediaList(),
         initialIndex: currentIndex,
@@ -156,27 +180,32 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
             return;
           }
 
-          final tracks = reorderByKeys(
-            state.tracks,
+          // Every entry is matched at most once, so copies of the same track
+          // stay separate entries instead of all becoming the first copy.
+          final current = _entries;
+          final entries = reconcileEntries(
+            current,
             playlist.medias.map(
               (media) => TrackSourceQuery.parseUri(media.uri).id,
             ),
             (track) => track.id,
           );
 
-          if (tracks.length != state.tracks.length) {
+          if (entries.length != current.length) {
             AppLogger.log.w("Mismatch in tracks after reordering/shuffling.");
-            final missingTracks =
-                state.tracks.where((track) => !tracks.contains(track)).toList();
+            final keptIds = entries.map((entry) => entry.id).toSet();
+            final missingTracks = current
+                .where((entry) => !keptIds.contains(entry.id))
+                .map((entry) => entry.track)
+                .toList();
             AppLogger.log.w(
               "Missing tracks: ${missingTracks.map((e) => e.id).join(", ")}",
             );
           }
 
-          state = state.copyWith(
-            tracks: tracks,
-            currentIndex: playlist.index,
-          );
+          state = state.withEntries(entries).copyWith(
+                currentIndex: playlist.index,
+              );
 
           await _updatePlayerState(
             AudioPlayerStateTableCompanion(
@@ -258,9 +287,10 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
               !state.tracks.any((element) => _compareTracks(element, track)),
         );
 
-    state = state.copyWith(
-      tracks: [...addableTracks, ...state.tracks],
-    );
+    state = state.withEntries([
+      ...createEntries(addableTracks, _newEntryId),
+      ..._entries,
+    ]);
 
     for (int i = 0; i < addableTracks.length; i++) {
       final track = addableTracks.elementAt(i);
@@ -285,9 +315,10 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     if (_blacklist.contains(track)) return;
     if (state.tracks.any((element) => _compareTracks(element, track))) return;
 
-    state = state.copyWith(
-      tracks: [...state.tracks, track],
-    );
+    state = state.withEntries([
+      ..._entries,
+      QueueEntry(_newEntryId(), track),
+    ]);
 
     await audioPlayer.addTrack(SpotubeMedia(track));
 
@@ -303,9 +334,10 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     _assertAllowedTracks(tracks);
 
     tracks = _blacklist.filter(tracks).toList();
-    state = state.copyWith(
-      tracks: [...state.tracks, ...tracks],
-    );
+    state = state.withEntries([
+      ..._entries,
+      ...createEntries(tracks, _newEntryId),
+    ]);
 
     for (final track in tracks) {
       await audioPlayer.addTrack(SpotubeMedia(track));
@@ -324,9 +356,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     if (index == -1) return;
 
-    state = state.copyWith(
-      tracks: List.of(state.tracks)..removeAt(index),
-    );
+    state = state.withEntries(removeIndexes(_entries, [index]));
 
     await audioPlayer.removeTrack(index);
 
@@ -340,17 +370,16 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
   Future<void> removeTracks(Iterable<String> trackIds) async {
     final idsToRemove = trackIds.toSet();
+    final entries = _entries;
 
     // Positions in the queue as it is *now*. They are removed back to front
     // so that each removal leaves the positions of the remaining ones intact.
     final trackIndexes = removalOrder(
-      indexesWhere(state.tracks, (track) => idsToRemove.contains(track.id)),
-      state.tracks.length,
+      indexesWhere(entries, (entry) => idsToRemove.contains(entry.track.id)),
+      entries.length,
     );
 
-    state = state.copyWith(
-      tracks: removeIndexes(state.tracks, trackIndexes),
-    );
+    state = state.withEntries(removeIndexes(entries, trackIndexes));
 
     for (final index in trackIndexes) {
       await audioPlayer.removeTrack(index);
@@ -402,12 +431,16 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     if (medias.isEmpty) return;
 
-    state = state.copyWith(
-      // These are filtered tracks as well
-      tracks: medias.map((media) => media.track).toList(),
-      currentIndex: initialIndex,
-      collections: [],
-    );
+    state = state
+        .withEntries(
+          // These are filtered tracks as well. Loading replaces the whole
+          // queue, so every track becomes a new entry.
+          createEntries(medias.map((media) => media.track), _newEntryId),
+        )
+        .copyWith(
+          currentIndex: initialIndex,
+          collections: [],
+        );
 
     await audioPlayer.openPlaylist(
       medias,
@@ -447,12 +480,18 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   Future<void> moveTrack(int oldIndex, int newIndex) async {
     if (!canMoveEntry(state.tracks.length, oldIndex, newIndex)) return;
 
+    // The player only reports track ids back, so it could not tell two copies
+    // of a track apart. The move is applied to the entries here, and the
+    // player's report afterwards just confirms it.
+    state = state.withEntries(moveEntry(_entries, oldIndex, newIndex));
+
     await audioPlayer.moveTrack(oldIndex, newIndex);
   }
 
   Future<void> stop() async {
     state = state.copyWith(
       tracks: [],
+      entryIds: [],
       currentIndex: 0,
       collections: [],
       loopMode: PlaylistMode.none,
