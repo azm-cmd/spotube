@@ -1137,4 +1137,60 @@ void main() {
       }
     });
   });
+
+  group('reorderItems', () {
+    // Rows of _mixed(): 0 e1, 1 G1[e2,e3,e4], 2 e5, 3 G2[e6,e7], 4 e8.
+
+    test('the identity order changes nothing', () {
+      final queue = _mixed().reorderItems([0, 1, 2, 3, 4]);
+      expect(_shape(queue), _shape(_mixed()));
+      expect(queue.groups, _mixed().groups);
+    });
+
+    test('rows move as wholes, groups keep their members in order', () {
+      final queue = _mixed().reorderItems([4, 3, 2, 1, 0]);
+      expect(_shape(queue), ['e8', 'G2[e6,e7]', 'e5', 'G1[e2,e3,e4]', 'e1']);
+      expect(_flat(queue), ['e8', 'e6', 'e7', 'e5', 'e2', 'e3', 'e4', 'e1']);
+      expect(queue.groups.map((g) => g.id), ['G2', 'G1']);
+      expect(queue.groupById('G1')!.memberIds, ['e2', 'e3', 'e4']);
+      expect(queue.validate(), isEmpty);
+    });
+
+    test('titles and collapsed state travel with the group', () {
+      final queue =
+          _mixed().setCollapsed('G2', false).reorderItems([3, 0, 1, 2, 4]);
+      expect(queue.groupById('G2')!.collapsed, isFalse);
+      expect(queue.groupById('G2')!.title, 'Two');
+    });
+
+    test('an empty queue takes the empty order', () {
+      final queue = GroupedQueue.ungrouped(<QueueEntry<_Track>>[]);
+      expect(queue.reorderItems(const []).entries, isEmpty);
+    });
+
+    test('refuses anything that is not a permutation of the rows', () {
+      expect(() => _mixed().reorderItems([0, 1, 2, 3]), throwsArgumentError);
+      expect(
+          () => _mixed().reorderItems([0, 1, 2, 3, 4, 5]), throwsArgumentError);
+      expect(() => _mixed().reorderItems([0, 1, 2, 3, 3]), throwsArgumentError);
+      expect(() => _mixed().reorderItems([0, 1, 2, 3, 5]), throwsArgumentError);
+      expect(
+          () => _mixed().reorderItems([-1, 1, 2, 3, 4]), throwsArgumentError);
+    });
+
+    test('refuses a queue that breaks the group rules', () {
+      final broken = GroupedQueue(_entries(['a', 'b', 'c']), const [
+        QueueGroup(id: 'G', title: '', memberIds: ['e1', 'e3']),
+      ]);
+      expect(() => broken.reorderItems([0, 1, 2]),
+          _failsWith(QueueGroupErrorReason.invalidQueue));
+    });
+
+    test('leaves the queue it was called on alone', () {
+      final queue = _mixed();
+      final before = _shape(queue);
+      queue.reorderItems([4, 3, 2, 1, 0]);
+      expect(_shape(queue), before);
+    });
+  });
 }

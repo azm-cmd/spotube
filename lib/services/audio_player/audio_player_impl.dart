@@ -120,8 +120,73 @@ class SpotubeAudioPlayer extends AudioPlayerInterface
     _mkPlayer.stop();
   }
 
+  // --- Shuffle ----------------------------------------------------------------
+  //
+  // Every shuffle request in the app (player controls, tray, lock screen,
+  // Connect, "shuffle play", restoring the saved queue) arrives at
+  // [setShuffle]. mpv's own shuffle mixes the whole playlist and knows nothing
+  // about queue groups, so [setShuffle] hands the request to [shuffleHandler],
+  // which decides whether mpv may do it. [setFlatShuffle] is the only code that
+  // calls mpv's shuffle, and the handler only uses it for a queue without
+  // groups.
+
+  /// Installed by the owner of the queue. Without one, requests go straight to
+  /// mpv.
+  Future<void> Function(bool shuffle)? shuffleHandler;
+
+  /// Set while the shuffle is done by the app instead of by mpv. It is then the
+  /// shuffle state everyone sees, whatever mpv's own flag says.
+  bool? _shuffleOverride;
+
+  late final StreamController<bool> _shuffleController = _startShuffleStream();
+
+  StreamController<bool> _startShuffleStream() {
+    final controller = StreamController<bool>.broadcast();
+    _mkPlayer.shuffleStream.listen((shuffled) {
+      if (_shuffleOverride == null) controller.add(shuffled);
+    });
+    return controller;
+  }
+
+  /// Whether the queue is shuffled, as the app reports it.
+  @override
+  bool get isShuffled => _shuffleOverride ?? _mkPlayer.shuffled;
+
+  /// Changes of [isShuffled].
+  @override
+  Stream<bool> get shuffledStream => _shuffleController.stream;
+
+  /// mpv's own shuffle flag, which can differ from [isShuffled] while the app
+  /// does the shuffling.
+  bool get isFlatShuffled => _mkPlayer.shuffled;
+
   Future<void> setShuffle(bool shuffle) async {
+    final handler = shuffleHandler;
+    if (handler != null) {
+      await handler(shuffle);
+      return;
+    }
+    await setFlatShuffle(shuffle);
+  }
+
+  /// mpv's shuffle of the whole playlist. It ignores queue groups and would
+  /// break them up: only call it for a queue without groups.
+  Future<void> setFlatShuffle(bool shuffle) async {
     await _mkPlayer.setShuffle(shuffle);
+  }
+
+  /// Reports [shuffled] as the shuffle state, whatever mpv's flag says.
+  void publishShuffle(bool shuffled) {
+    _shuffleOverride = shuffled;
+    _shuffleController.add(shuffled);
+  }
+
+  /// Goes back to reporting mpv's own flag.
+  void releaseShuffle() {
+    // Nothing was overridden: mpv's own events already say everything.
+    if (_shuffleOverride == null) return;
+    _shuffleOverride = null;
+    _shuffleController.add(_mkPlayer.shuffled);
   }
 
   Future<void> setLoopMode(PlaylistMode loop) async {

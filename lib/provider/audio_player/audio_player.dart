@@ -15,6 +15,7 @@ import 'package:spotube/provider/server/track_sources.dart';
 import 'package:spotube/services/audio_player/audio_player.dart';
 import 'package:spotube/services/audio_player/queue_groups.dart';
 import 'package:spotube/services/audio_player/queue_operations.dart';
+import 'package:spotube/services/audio_player/queue_shuffle.dart';
 import 'package:spotube/services/audio_player/queue_sync.dart';
 import 'package:spotube/services/logger/logger.dart';
 import 'package:uuid/uuid.dart';
@@ -59,6 +60,39 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     port: _AudioPlayerPort(),
     keyOf: (track) => track.id,
   );
+
+  /// Carries out every shuffle request. mpv shuffles a queue without groups;
+  /// a queue with groups is shuffled here, in Dart, so groups stay whole.
+  late final QueueShuffler<SpotubeTrackObject> _shuffler = QueueShuffler(
+    sync: _sync,
+    port: _AudioPlayerShufflePort(),
+    nextInt: Random().nextInt,
+  );
+
+  /// Where `audioPlayer.setShuffle` sends every request, so that nothing can
+  /// reach mpv's flat shuffle without passing the group check.
+  Future<void> _setShuffle(bool shuffle) async {
+    final reordered = await _shuffler.setShuffle(
+      shuffle,
+      read: () => _snapshot,
+      commit: _commitSnapshot,
+    );
+    if (reordered) {
+      // mpv did not shuffle, so it did not report the new order either.
+      await _updatePlayerState(
+        AudioPlayerStateTableCompanion(
+          tracks: Value(state.tracks),
+          currentIndex: Value(max(state.currentIndex, 0)),
+        ),
+      );
+    }
+  }
+
+  void _commitSnapshot(QueueSnapshot<SpotubeTrackObject> confirmed) {
+    state = state.withGroupedQueue(confirmed.queue).copyWith(
+          currentIndex: confirmed.currentIndex,
+        );
+  }
 
   void _assertAllowedTracks(Iterable<SpotubeTrackObject> tracks) {
     assert(
@@ -145,6 +179,8 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
   @override
   build() {
+    audioPlayer.shuffleHandler = _setShuffle;
+
     final subscriptions = [
       audioPlayer.playingStream.listen((playing) async {
         try {
@@ -245,6 +281,9 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     _syncSavedState();
 
     ref.onDispose(() {
+      if (audioPlayer.shuffleHandler == _setShuffle) {
+        audioPlayer.shuffleHandler = null;
+      }
       for (final subscription in subscriptions) {
         subscription.cancel();
       }
@@ -480,6 +519,10 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       autoPlay: autoPlay,
     );
 
+    // Opening a queue switches mpv's shuffle off; the same goes for a shuffle
+    // done in Dart, which belonged to the old queue.
+    _shuffler.reset();
+
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
         tracks: Value(state.tracks),
@@ -549,11 +592,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       await _sync.apply(
         from,
         target,
-        commit: (confirmed) {
-          state = state.withGroupedQueue(confirmed.queue).copyWith(
-                currentIndex: confirmed.currentIndex,
-              );
-        },
+        commit: _commitSnapshot,
       );
 
       // Only the order of the queue is saved, so a change that left the order
@@ -653,6 +692,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       shuffled: false,
     );
     await audioPlayer.stop();
+    _shuffler.reset();
     await _updatePlayerState(
       AudioPlayerStateTableCompanion(
         tracks: Value(state.tracks),
@@ -665,6 +705,25 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     );
     ref.read(discordProvider.notifier).clear();
   }
+}
+
+/// The real player's shuffle, as [QueueShuffler] sees it.
+class _AudioPlayerShufflePort implements ShufflePort {
+  @override
+  bool get isShuffled => audioPlayer.isShuffled;
+
+  @override
+  bool get isFlatShuffled => audioPlayer.isFlatShuffled;
+
+  @override
+  Future<void> setFlatShuffle(bool shuffle) =>
+      audioPlayer.setFlatShuffle(shuffle);
+
+  @override
+  void publishShuffle(bool shuffled) => audioPlayer.publishShuffle(shuffled);
+
+  @override
+  void releaseShuffle() => audioPlayer.releaseShuffle();
 }
 
 /// The real player, as [GroupedQueueSync] sees it.

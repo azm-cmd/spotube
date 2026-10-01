@@ -687,6 +687,28 @@ class GroupedQueue<T> {
     ]);
   }
 
+  /// Puts the top-level [items] rows in a new order: row `i` of the result is
+  /// row `order[i]` of the current queue. [order] must hold every row index
+  /// exactly once.
+  ///
+  /// Rows move as wholes, so a group stays one contiguous block with its
+  /// members in their own order. This is the building block for shuffling.
+  ///
+  /// Throws an [ArgumentError] if [order] is not a permutation of the rows.
+  GroupedQueue<T> reorderItems(List<int> order) {
+    _requireValid();
+    final rows = _items();
+    if (order.length != rows.length ||
+        order.toSet().length != order.length ||
+        order.any((i) => i < 0 || i >= rows.length)) {
+      throw ArgumentError(
+        'reorderItems needs each row index of 0..${rows.length - 1} exactly '
+        'once, got $order',
+      );
+    }
+    return _fromItems([for (final i in order) rows[i]]);
+  }
+
   // --- Changing the queue itself --------------------------------------------------
 
   /// Removes entries from the queue, and from any group they were in. A group
