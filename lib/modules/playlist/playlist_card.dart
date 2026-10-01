@@ -142,7 +142,7 @@ class PlaylistCard extends HookConsumerWidget {
 
         if (fetchedInitialTracks.isEmpty) return;
 
-        playlistNotifier.addTracks(fetchedInitialTracks);
+        final added = playlistNotifier.addTracks(fetchedInitialTracks);
         playlistNotifier.addCollection(playlist.id);
         historyNotifier.addPlaylists([playlist]);
         if (context.mounted) {
@@ -158,8 +158,9 @@ class PlaylistCard extends HookConsumerWidget {
                   trailing: Button.outline(
                     child: Text(context.l10n.undo),
                     onPressed: () {
-                      playlistNotifier
-                          .removeTracks(fetchedInitialTracks.map((e) => e.id));
+                      // Take back exactly what was added, not every copy of
+                      // these tracks.
+                      added.then(playlistNotifier.removeEntries);
                     },
                   ),
                 ),

@@ -123,7 +123,7 @@ class AlbumCard extends HookConsumerWidget {
         final fetchedTracks = await fetchAllTrack();
 
         if (fetchedTracks.isEmpty) return;
-        playlistNotifier.addTracks(fetchedTracks);
+        final added = playlistNotifier.addTracks(fetchedTracks);
         playlistNotifier.addCollection(album.id);
         historyNotifier.addAlbums([album]);
         if (context.mounted) {
@@ -138,8 +138,9 @@ class AlbumCard extends HookConsumerWidget {
                   trailing: Button.outline(
                     child: Text(context.l10n.undo),
                     onPressed: () {
-                      playlistNotifier
-                          .removeTracks(fetchedTracks.map((e) => e.id));
+                      // Take back exactly what was added, not every copy of
+                      // these tracks.
+                      added.then(playlistNotifier.removeEntries);
                     },
                   ),
                 ),

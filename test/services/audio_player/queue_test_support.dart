@@ -94,6 +94,29 @@ class FakeMpv implements QueuePlayerPort {
     onReport?.call();
   }
 
+  int _inserts = 0;
+  int? _failAtInsert;
+
+  /// Throw on the [n]-th insert from now on (1 = the next one).
+  void failInsertNumber(int n) => _failAtInsert = _inserts + n;
+
+  /// `loadfile ... insert-at` / `append`: the entry goes before the one at
+  /// [index] (the length appends). The playing entry stays the playing entry.
+  Future<void> insertTrack(
+    int index,
+    QueueEntry<TestTrack> entry, {
+    required bool append,
+  }) async {
+    // What the app asked for, not what it came to: appending is its own call.
+    commands.add(append ? 'append' : 'insert $index');
+    _inserts++;
+    if (_failAtInsert == _inserts) throw StateError('mpv refused the insert');
+    RangeError.checkValueInInterval(index, 0, playlist.length, 'index');
+    playlist.insert(index, FakeSlot(entry.id, entry.track.id));
+    playing ??= playlist.first;
+    onReport?.call();
+  }
+
   /// The user (or auto-advance) switches to another entry.
   void jump(int index) {
     playing = playlist[index];
@@ -145,6 +168,36 @@ class QueueRig {
       snapshot = next;
     }
   }
+
+  /// The notifier's way of adding tracks: [trackIds] become new entries
+  /// (ids n1, n2, ...) at [index], or after the playing entry's group for
+  /// "play next".
+  Future<List<String>> insert(
+    List<String> trackIds, {
+    int? index,
+    bool afterPlaying = false,
+  }) {
+    return sync.exclusive(() async {
+      final from = snapshot;
+      final length = from.queue.entries.length;
+      final added = [
+        for (final id in trackIds) QueueEntry('n${++_added}', TestTrack(id)),
+      ];
+      final at = index ??
+          (afterPlaying ? playNextIndex(length, from.currentIndex) : length);
+      await sync.insert(
+        from,
+        at,
+        added,
+        send: (i, entry, {required append}) =>
+            mpv.insertTrack(i, entry, append: append),
+        commit: (confirmed) => snapshot = confirmed,
+      );
+      return [for (final e in added) e.id];
+    });
+  }
+
+  int _added = 0;
 
   /// The notifier's `_changeGroups`.
   Future<void> run(TestQueue Function(TestQueue queue) change) {

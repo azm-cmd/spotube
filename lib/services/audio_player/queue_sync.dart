@@ -237,6 +237,81 @@ class GroupedQueueSync<T> {
     await _remove(from, target, fromIds, targetIds, playingId, commit);
   }
 
+  /// Adds [added] (new, loose entries) to the queue at [index] and to the
+  /// player, without touching the entries that are already there.
+  ///
+  /// [index] is where the entries should go; if that is inside a group it
+  /// becomes the position right after the group (see
+  /// [GroupedQueue.insertUngrouped]), so a group is never split. The added
+  /// entries keep their order and sit next to each other.
+  ///
+  /// [send] puts one entry into the player at its final position; `append` is
+  /// true when that position is the end of the player's playlist. Entries are
+  /// sent from the front, so every position is final when it is used.
+  ///
+  /// Like a removal, [commit] runs first: the queue is shown with the new
+  /// entries at once, the playing entry is the same entry, and the player's
+  /// reports while the entries are on their way (shorter than the queue) are
+  /// ignored. If the player ends up with something else, it is the truth.
+  Future<void> insert(
+    QueueSnapshot<T> from,
+    int index,
+    List<QueueEntry<T>> added, {
+    required Future<void> Function(
+      int index,
+      QueueEntry<T> entry, {
+      required bool append,
+    }) send,
+    required void Function(QueueSnapshot<T> confirmed) commit,
+  }) async {
+    if (added.isEmpty) return;
+
+    final target = from.queue.insertUngrouped(index, added);
+    final targetIds = _ids(target.entries);
+    final addedIds = {for (final entry in added) entry.id};
+    final playingId = from.currentEntryId;
+
+    final playingAt = playingId == null ? -1 : targetIds.indexOf(playingId);
+    final committed = QueueSnapshot(
+      target,
+      playingAt == -1 ? from.currentIndex : playingAt,
+    );
+    commit(committed);
+
+    _applying++;
+    try {
+      Object? failure;
+      StackTrace? failureStack;
+      try {
+        var length = from.queue.entries.length;
+        for (var i = 0; i < target.entries.length; i++) {
+          if (!addedIds.contains(target.entries[i].id)) continue;
+          await send(i, target.entries[i], append: i == length);
+          length++;
+        }
+      } catch (error, stack) {
+        failure = error;
+        failureStack = stack;
+      }
+
+      final targetKeys = [for (final e in target.entries) keyOf(e.track)];
+      final playerKeys = port.playlistKeys;
+      if (failure != null || !_sameSequence(playerKeys, targetKeys)) {
+        // The player is not where it was asked to be: it is the truth.
+        commit(mirror(committed, playerKeys, port.currentIndex));
+      }
+
+      // Let reports that are already on their way arrive while still guarded.
+      await Future<void>.delayed(Duration.zero);
+
+      if (failure != null) {
+        Error.throwWithStackTrace(failure, failureStack!);
+      }
+    } finally {
+      _applying--;
+    }
+  }
+
   Future<void> _reorder(
     QueueSnapshot<T> from,
     GroupedQueue<T> target,

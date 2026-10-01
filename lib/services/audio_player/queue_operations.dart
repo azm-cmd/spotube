@@ -21,6 +21,7 @@
 library;
 
 import 'dart:collection';
+import 'dart:math';
 
 /// A half-open range `[start, end)` of positions inside a queue.
 class QueueRange {
@@ -95,6 +96,13 @@ List<QueueRange> contiguousRanges(Iterable<int> indexes) {
 /// An empty set is not contiguous.
 bool isContiguous(Iterable<int> indexes) {
   return contiguousRanges(indexes).length == 1;
+}
+
+/// Where "play next" puts tracks in a queue of [length] entries whose playing
+/// position is [currentIndex]: right after the playing one. With nothing
+/// playing it is after the first entry, and it is never past the end.
+int playNextIndex(int length, int currentIndex) {
+  return min(max(currentIndex, 0) + 1, length);
 }
 
 /// Inserts [entries] so that the first one ends up at [index].

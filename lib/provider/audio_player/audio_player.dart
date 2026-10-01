@@ -368,133 +368,103 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     await removeCollections([collectionId]);
   }
 
+  /// Puts new tracks into the queue as loose entries, each with an identity of
+  /// its own (so a track queued twice is two entries), and returns their entry
+  /// ids in the order they were given.
+  ///
+  /// Every way of adding tracks goes through here and through
+  /// [GroupedQueueSync.insert], so the queue, its groups and the player agree:
+  /// a group is never split, the playing entry stays the playing entry, and
+  /// the added entries are never part of a group.
+  ///
+  ///  * [afterPlaying]: right after the playing entry, or after its group if it
+  ///    is in one ("play next"). Otherwise at the end of the queue.
+  ///  * [skipQueued]: leave out tracks that are in the queue already.
+  Future<List<String>> _insertTracks(
+    Iterable<SpotubeTrackObject> tracks, {
+    required bool afterPlaying,
+    bool skipQueued = false,
+  }) {
+    return _sync.exclusive(() async {
+      final from = _snapshot;
+      final length = from.queue.entries.length;
+
+      final added = createEntries(
+        _blacklist.filter(tracks).where(
+              (track) =>
+                  !skipQueued ||
+                  !state.tracks
+                      .any((element) => _compareTracks(element, track)),
+            ),
+        _newEntryId,
+      );
+      if (added.isEmpty) return const <String>[];
+
+      await _sync.insert(
+        from,
+        afterPlaying ? playNextIndex(length, from.currentIndex) : length,
+        added,
+        send: (index, entry, {required append}) => append
+            ? audioPlayer.addTrack(SpotubeMedia(entry.track))
+            : audioPlayer.addTrackAt(SpotubeMedia(entry.track), index),
+        commit: _commitSnapshot,
+      );
+
+      await _updatePlayerState(
+        AudioPlayerStateTableCompanion(
+          tracks: Value(_savedQueue),
+          currentIndex: Value(max(state.currentIndex, 0)),
+        ),
+      );
+      return [for (final entry in added) entry.id];
+    });
+  }
+
+  /// "Play next": after the playing track (after its group, if it is in one).
+  /// Tracks that are queued already are left out unless [allowDuplicates].
   Future<void> addTracksAtFirst(
     Iterable<SpotubeTrackObject> tracks, {
     bool allowDuplicates = false,
   }) async {
     _assertAllowedTracks(tracks);
-    if (state.tracks.length == 1) {
-      return addTracks(tracks);
-    }
-
-    final addableTracks = _blacklist.filter(tracks).where(
-          (track) =>
-              allowDuplicates ||
-              !state.tracks.any((element) => _compareTracks(element, track)),
-        );
-
-    state = state.withEntries([
-      ...createEntries(addableTracks, _newEntryId),
-      ..._entries,
-    ]);
-
-    for (int i = 0; i < addableTracks.length; i++) {
-      final track = addableTracks.elementAt(i);
-
-      await audioPlayer.addTrackAt(
-        SpotubeMedia(track),
-        max(state.currentIndex, 0) + i + 1,
-      );
-    }
-
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: Value(max(state.currentIndex, 0)),
-      ),
+    await _insertTracks(
+      tracks,
+      afterPlaying: true,
+      // With a single track queued there is nothing to compare against.
+      skipQueued: !allowDuplicates && state.tracks.length != 1,
     );
   }
 
+  /// "Add to queue" for one track: at the end, unless it is queued already.
   Future<void> addTrack(SpotubeTrackObject track) async {
     _assertAllowedTrack(track);
-
-    if (_blacklist.contains(track)) return;
-    if (state.tracks.any((element) => _compareTracks(element, track))) return;
-
-    state = state.withEntries([
-      ..._entries,
-      QueueEntry(_newEntryId(), track),
-    ]);
-
-    await audioPlayer.addTrack(SpotubeMedia(track));
-
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: Value(max(state.currentIndex, 0)),
-      ),
-    );
+    await _insertTracks([track], afterPlaying: false, skipQueued: true);
   }
 
-  Future<void> addTracks(Iterable<SpotubeTrackObject> tracks) async {
+  /// "Add to queue": at the end, in the order given. Returns the entry ids of
+  /// what was added, so a caller can take back exactly that.
+  Future<List<String>> addTracks(Iterable<SpotubeTrackObject> tracks) async {
     _assertAllowedTracks(tracks);
-
-    tracks = _blacklist.filter(tracks).toList();
-    state = state.withEntries([
-      ..._entries,
-      ...createEntries(tracks, _newEntryId),
-    ]);
-
-    for (final track in tracks) {
-      await audioPlayer.addTrack(SpotubeMedia(track));
-    }
-
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: Value(max(state.currentIndex, 0)),
-      ),
-    );
+    return _insertTracks(tracks, afterPlaying: false);
   }
 
+  /// Removes the first entry of the track. Prefer [removeEntries] when the
+  /// entry is known: this cannot tell copies of a track apart.
   Future<void> removeTrack(String trackId) async {
-    final index = state.tracks.indexWhere((element) => element.id == trackId);
-
+    final entries = _entries;
+    final index = entries.indexWhere((entry) => entry.track.id == trackId);
     if (index == -1) return;
-
-    // The flat result is what it always was; groups lose the removed member.
-    final queue = _grouped;
-    state = state.withGroupedQueue(
-      queue.followPlayer(removeIndexes(queue.entries, [index])),
-    );
-
-    await audioPlayer.removeTrack(index);
-
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: Value(max(state.currentIndex, 0)),
-      ),
-    );
+    await removeEntries([entries[index].id]);
   }
 
-  Future<void> removeTracks(Iterable<String> trackIds) async {
-    final idsToRemove = trackIds.toSet();
-    final queue = _grouped;
-    final entries = queue.entries;
-
-    // Positions in the queue as it is *now*. They are removed back to front
-    // so that each removal leaves the positions of the remaining ones intact.
-    final trackIndexes = removalOrder(
-      indexesWhere(entries, (entry) => idsToRemove.contains(entry.track.id)),
-      entries.length,
-    );
-
-    // Groups lose the removed members (and disappear once empty).
-    state = state.withGroupedQueue(
-      queue.followPlayer(removeIndexes(entries, trackIndexes)),
-    );
-
-    for (final index in trackIndexes) {
-      await audioPlayer.removeTrack(index);
-    }
-
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: Value(max(state.currentIndex, 0)),
-      ),
-    );
+  /// Removes every entry of the given tracks. Prefer [removeEntries] when the
+  /// entries are known: this cannot tell copies of a track apart.
+  Future<void> removeTracks(Iterable<String> trackIds) {
+    final ids = trackIds.toSet();
+    return removeEntries([
+      for (final entry in _entries)
+        if (ids.contains(entry.track.id)) entry.id,
+    ]);
   }
 
   bool _compareTracks(SpotubeTrackObject a, SpotubeTrackObject b) {
