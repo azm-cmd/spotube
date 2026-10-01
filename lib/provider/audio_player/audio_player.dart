@@ -1,6 +1,5 @@
 import 'dart:math';
 
-import 'package:collection/collection.dart';
 import 'package:drift/drift.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
@@ -14,6 +13,7 @@ import 'package:spotube/provider/database/database.dart';
 import 'package:spotube/provider/discord_provider.dart';
 import 'package:spotube/provider/server/track_sources.dart';
 import 'package:spotube/services/audio_player/audio_player.dart';
+import 'package:spotube/services/audio_player/queue_operations.dart';
 import 'package:spotube/services/logger/logger.dart';
 
 class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
@@ -156,20 +156,13 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
             return;
           }
 
-          final trackGroupedById = groupBy(
+          final tracks = reorderByKeys(
             state.tracks,
-            (query) => query.id,
+            playlist.medias.map(
+              (media) => TrackSourceQuery.parseUri(media.uri).id,
+            ),
+            (track) => track.id,
           );
-
-          final tracks = <SpotubeTrackObject>[];
-
-          for (final media in playlist.medias) {
-            final trackQuery = TrackSourceQuery.parseUri(media.uri);
-            final track = trackGroupedById[trackQuery.id]?.firstOrNull;
-            if (track != null) {
-              tracks.add(track);
-            }
-          }
 
           if (tracks.length != state.tracks.length) {
             AppLogger.log.w("Mismatch in tracks after reordering/shuffling.");
@@ -346,16 +339,17 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   }
 
   Future<void> removeTracks(Iterable<String> trackIds) async {
-    final trackIndexes = state.tracks
-        .where((element) => trackIds.any((trackId) => trackId == element.id))
-        .mapIndexed((index, element) => index);
+    final idsToRemove = trackIds.toSet();
 
-    final tracks = state.tracks.where(
-      (element) => !trackIds.contains(element.id),
+    // Positions in the queue as it is *now*. They are removed back to front
+    // so that each removal leaves the positions of the remaining ones intact.
+    final trackIndexes = removalOrder(
+      indexesWhere(state.tracks, (track) => idsToRemove.contains(track.id)),
+      state.tracks.length,
     );
 
     state = state.copyWith(
-      tracks: tracks.toList(),
+      tracks: removeIndexes(state.tracks, trackIndexes),
     );
 
     for (final index in trackIndexes) {
@@ -451,13 +445,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   }
 
   Future<void> moveTrack(int oldIndex, int newIndex) async {
-    if (oldIndex == newIndex ||
-        newIndex < 0 ||
-        oldIndex < 0 ||
-        newIndex > state.tracks.length - 1 ||
-        oldIndex > state.tracks.length - 1) {
-      return;
-    }
+    if (!canMoveEntry(state.tracks.length, oldIndex, newIndex)) return;
 
     await audioPlayer.moveTrack(oldIndex, newIndex);
   }
