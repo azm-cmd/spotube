@@ -58,7 +58,7 @@ void main() {
 
   test('a saved Dart shuffle is restored before the queue is opened', () {
     final body = methodBody('Future<void> _syncSavedState()');
-    final restore = body.indexOf('_shuffler.restore(');
+    final restore = body.indexOf('_shuffler.restoreNow(');
     final open = body.indexOf('audioPlayer.openPlaylist(');
 
     expect(restore, isNonNegative);

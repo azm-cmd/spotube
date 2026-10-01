@@ -173,25 +173,29 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         ),
       );
     } else if (tracks.isNotEmpty) {
-      // The saved queue carries its entry ids and groups; a queue saved before
-      // Queue Groups has neither, and gets new ids and no groups.
-      state = state
-          .withGroupedQueue(saved.queue)
-          .copyWith(currentIndex: currentIndex);
+      // Replacing the queue is a queue change like any other: it waits for the
+      // ones in progress and the ones after it wait for it.
+      await _sync.exclusive(() async {
+        // The saved queue carries its entry ids and groups; a queue saved
+        // before Queue Groups has neither, and gets new ids and no groups.
+        state = state
+            .withGroupedQueue(saved.queue)
+            .copyWith(currentIndex: currentIndex);
 
-      // A queue that was shuffled in Dart is still in its shuffled order; this
-      // makes it report "shuffled" again and remember how to unshuffle it. It
-      // comes before the queue is opened so that the writes the opening causes
-      // already save the shuffle order, and so that mpv resetting its own flag
-      // while opening is not what the app reports.
-      final shuffleOrder = saved.shuffleOrder;
-      if (shuffleOrder != null) await _shuffler.restore(shuffleOrder);
+        // A queue that was shuffled in Dart is still in its shuffled order;
+        // this makes it report "shuffled" again and remember how to unshuffle
+        // it. It comes before the queue is opened so that the writes the
+        // opening causes already save the shuffle order, and so that mpv
+        // resetting its own flag while opening is not what the app reports.
+        final shuffleOrder = saved.shuffleOrder;
+        if (shuffleOrder != null) _shuffler.restoreNow(shuffleOrder);
 
-      await audioPlayer.openPlaylist(
-        tracks.asMediaList(),
-        initialIndex: currentIndex,
-        autoPlay: false,
-      );
+        await audioPlayer.openPlaylist(
+          tracks.asMediaList(),
+          initialIndex: currentIndex,
+          autoPlay: false,
+        );
+      });
     }
 
     if (playerState.collections.isNotEmpty) {
@@ -505,79 +509,121 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     if (medias.isEmpty) return;
 
-    state = state
-        .withEntries(
-          // These are filtered tracks as well. Loading replaces the whole
-          // queue, so every track becomes a new entry.
-          createEntries(medias.map((media) => media.track), _newEntryId),
-        )
-        .copyWith(
-          currentIndex: initialIndex,
-          collections: [],
-          groups: [],
-        );
+    // Replacing the queue waits for the queue changes in progress, and the
+    // ones after it wait for it.
+    await _sync.exclusive(() async {
+      state = state
+          .withEntries(
+            // These are filtered tracks as well. Loading replaces the whole
+            // queue, so every track becomes a new entry.
+            createEntries(medias.map((media) => media.track), _newEntryId),
+          )
+          .copyWith(
+            currentIndex: initialIndex,
+            collections: [],
+            groups: [],
+          );
 
-    await audioPlayer.openPlaylist(
-      medias,
-      initialIndex: initialIndex,
-      autoPlay: autoPlay,
-    );
+      await audioPlayer.openPlaylist(
+        medias,
+        initialIndex: initialIndex,
+        autoPlay: autoPlay,
+      );
 
-    // Opening a queue switches mpv's shuffle off; the same goes for a shuffle
-    // done in Dart, which belonged to the old queue.
-    _shuffler.reset();
+      // Opening a queue switches mpv's shuffle off; the same goes for a
+      // shuffle done in Dart, which belonged to the old queue.
+      _shuffler.reset();
 
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: Value(max(state.currentIndex, 0)),
-      ),
-    );
+      await _updatePlayerState(
+        AudioPlayerStateTableCompanion(
+          tracks: Value(_savedQueue),
+          currentIndex: Value(max(state.currentIndex, 0)),
+        ),
+      );
+    });
   }
 
-  Future<void> swapActiveSource() async {
-    if (state.tracks.isEmpty || state.activeTrack is! SpotubeFullTrackObject) {
-      return;
-    }
+  /// Reloads the playing track from a new source: the playlist item of the
+  /// playing entry is replaced by a fresh one. The queue does not change (the
+  /// entry keeps its id, place and group); only the player's item is swapped,
+  /// as one queue change like the others, so nothing else touches the
+  /// player's playlist in the middle of it.
+  Future<void> swapActiveSource() {
+    return _sync.exclusive(() async {
+      final from = _snapshot;
+      final active = state.activeTrack;
+      if (state.tracks.isEmpty || active is! SpotubeFullTrackObject) return;
 
-    final currentIndex = state.currentIndex;
-    final currentTrack = state.activeTrack as SpotubeFullTrackObject;
-    final swappedMedia = SpotubeMedia(currentTrack);
-
-    await audioPlayer.addTrackAt(swappedMedia, currentIndex + 1);
-    await audioPlayer.skipToNext();
-    await audioPlayer.removeTrack(currentIndex);
+      await _sync.swapInPlace(
+        from,
+        swap: (playingIndex) async {
+          await audioPlayer.addTrackAt(
+            SpotubeMedia(active),
+            playingIndex + 1,
+          );
+          await audioPlayer.skipToNext();
+          await audioPlayer.removeTrack(playingIndex);
+        },
+        commit: _commitSnapshot,
+      );
+    });
   }
 
-  Future<void> jumpToTrack(SpotubeTrackObject track) async {
-    final index =
-        state.tracks.toList().indexWhere((element) => element.id == track.id);
-    if (index == -1) return;
+  /// Plays the entry at [index] of the queue, and says so in the app's queue
+  /// at once. The player reports its new position a little later; a queue
+  /// change that starts in between must already know which entry plays.
+  Future<void> _jumpTo(int index) async {
     await audioPlayer.jumpTo(index);
+    state = state.copyWith(currentIndex: index);
+  }
+
+  Future<void> jumpToTrack(SpotubeTrackObject track) {
+    return _sync.exclusive(() async {
+      final index =
+          state.tracks.indexWhere((element) => element.id == track.id);
+      if (index == -1) return;
+      await _jumpTo(index);
+    });
   }
 
   /// Plays the queue entry [entryId]. Unlike [jumpToTrack] this reaches the
   /// right copy when a track is queued more than once.
-  Future<void> jumpToEntry(String entryId) async {
-    final index = state.entryIds.indexOf(entryId);
-    if (index == -1) return;
-    await audioPlayer.jumpTo(index);
+  Future<void> jumpToEntry(String entryId) {
+    return _sync.exclusive(() async {
+      final index = state.entryIds.indexOf(entryId);
+      if (index == -1) return;
+      await _jumpTo(index);
+    });
   }
 
-  Future<void> moveTrack(int oldIndex, int newIndex) async {
-    if (!canMoveEntry(state.tracks.length, oldIndex, newIndex)) return;
+  /// Plays the entry at [index] of the queue as it is when this runs (after
+  /// the queue changes already asked for).
+  Future<void> jumpToIndex(int index) {
+    return _sync.exclusive(() async {
+      if (index < 0 || index >= state.tracks.length) return;
+      await _jumpTo(index);
+    });
+  }
 
-    // The player only reports track ids back, so it could not tell two copies
-    // of a track apart. The move is applied to the entries here, and the
-    // player's report afterwards just confirms it.
-    //
-    // A plain move of one track is not group-aware: a group it breaks up is
-    // dissolved (its tracks stay), see GroupedQueue.followPlayer.
-    state = state.withGroupedQueue(
-      _grouped.followPlayer(moveEntry(_entries, oldIndex, newIndex)),
-    );
-
-    await audioPlayer.moveTrack(oldIndex, newIndex);
+  /// Moves the track at [oldIndex] so that it sits where the track at
+  /// [newIndex] is now: the plain reorder of the flat queue. (A drop after the
+  /// last track is ignored, as it always was.)
+  ///
+  /// The two tracks are named at the moment of the call, by entry id, and the
+  /// move waits its turn behind the queue changes already asked for; so it
+  /// still moves those entries even if other changes shift their positions
+  /// first. A group that the move breaks up is dissolved (see
+  /// [GroupedQueue.moveEntryBefore]); moving whole groups and members inside
+  /// them is [moveGroup], [moveQueueItem] and [moveWithinGroup].
+  Future<void> moveTrack(int oldIndex, int newIndex) {
+    final ids = state.entryIds;
+    if (ids.length != state.tracks.length ||
+        !canMoveEntry(ids.length, oldIndex, newIndex)) {
+      return Future<void>.value();
+    }
+    final movedId = ids[oldIndex];
+    final beforeId = newIndex >= ids.length ? null : ids[newIndex];
+    return _changeGroups((queue) => queue.moveEntryBefore(movedId, beforeId));
   }
 
   // --- Queue groups -----------------------------------------------------------
@@ -691,30 +737,32 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     return _changeGroups((queue) => queue.removeEntries(entryIds));
   }
 
-  Future<void> stop() async {
-    state = state.copyWith(
-      tracks: [],
-      entryIds: [],
-      groups: [],
-      currentIndex: 0,
-      collections: [],
-      loopMode: PlaylistMode.none,
-      playing: false,
-      shuffled: false,
-    );
-    await audioPlayer.stop();
-    _shuffler.reset();
-    await _updatePlayerState(
-      AudioPlayerStateTableCompanion(
-        tracks: Value(_savedQueue),
-        currentIndex: const Value(0),
-        collections: const Value(<String>[]),
-        loopMode: const Value(PlaylistMode.none),
-        playing: const Value(false),
-        shuffled: const Value(false),
-      ),
-    );
-    ref.read(discordProvider.notifier).clear();
+  Future<void> stop() {
+    return _sync.exclusive(() async {
+      state = state.copyWith(
+        tracks: [],
+        entryIds: [],
+        groups: [],
+        currentIndex: 0,
+        collections: [],
+        loopMode: PlaylistMode.none,
+        playing: false,
+        shuffled: false,
+      );
+      await audioPlayer.stop();
+      _shuffler.reset();
+      await _updatePlayerState(
+        AudioPlayerStateTableCompanion(
+          tracks: Value(_savedQueue),
+          currentIndex: const Value(0),
+          collections: const Value(<String>[]),
+          loopMode: const Value(PlaylistMode.none),
+          playing: const Value(false),
+          shuffled: const Value(false),
+        ),
+      );
+      ref.read(discordProvider.notifier).clear();
+    });
   }
 }
 

@@ -1193,4 +1193,57 @@ void main() {
       expect(_shape(queue), before);
     });
   });
+
+  group('moveEntryBefore', () {
+    // e1 e2 [G: e3 e4] e5
+    GroupedQueue<String> queue() => GroupedQueue.ungrouped([
+          for (var i = 1; i <= 5; i++) QueueEntry('e$i', 't$i'),
+        ]).createGroup(groupId: 'G', title: 'g', entryIds: ['e3', 'e4']);
+
+    List<String> ids(GroupedQueue<String> q) =>
+        [for (final e in q.entries) e.id];
+
+    test('puts the entry right before the other one', () {
+      expect(ids(queue().moveEntryBefore('e1', 'e5')),
+          ['e2', 'e3', 'e4', 'e1', 'e5']);
+      expect(ids(queue().moveEntryBefore('e5', 'e1')),
+          ['e5', 'e1', 'e2', 'e3', 'e4']);
+    });
+
+    test('null means the end', () {
+      expect(ids(queue().moveEntryBefore('e1', null)),
+          ['e2', 'e3', 'e4', 'e5', 'e1']);
+    });
+
+    test('keeps a group whole when it lands beside it', () {
+      final moved = queue().moveEntryBefore('e1', 'e3'); // just before G
+      expect(ids(moved), ['e2', 'e1', 'e3', 'e4', 'e5']);
+      expect(moved.groupById('G')!.memberIds, ['e3', 'e4']);
+      expect(moved.validate(), isEmpty);
+    });
+
+    test('dissolves a group that the move breaks up, keeping its entries', () {
+      final moved = queue().moveEntryBefore('e1', 'e4'); // between e3 and e4
+      expect(ids(moved), ['e2', 'e3', 'e1', 'e4', 'e5']);
+      expect(moved.groups, isEmpty);
+      expect(moved.validate(), isEmpty);
+    });
+
+    test('does nothing when an entry is gone or nothing would change', () {
+      final q = queue();
+      expect(identical(q.moveEntryBefore('gone', 'e1'), q), isTrue);
+      expect(identical(q.moveEntryBefore('e1', 'gone'), q), isTrue);
+      expect(identical(q.moveEntryBefore('e2', 'e3'), q), isTrue); // in place
+      expect(identical(q.moveEntryBefore('e2', 'e2'), q), isTrue);
+      expect(identical(q.moveEntryBefore('e5', null), q), isTrue);
+    });
+
+    test('names entries, so copies of a track are told apart', () {
+      final copies = GroupedQueue.ungrouped([
+        for (var i = 1; i <= 4; i++) QueueEntry('e$i', 'same'),
+      ]);
+      expect(ids(copies.moveEntryBefore('e3', 'e1')), ['e3', 'e1', 'e2', 'e4']);
+      expect(ids(copies.moveEntryBefore('e1', 'e4')), ['e2', 'e3', 'e1', 'e4']);
+    });
+  });
 }

@@ -126,9 +126,19 @@ void main() {
   test('the notifier can play an entry, not only a track', () {
     final notifier = read('lib/provider/audio_player/audio_player.dart');
     final start = notifier.indexOf('Future<void> jumpToEntry(');
-    final body =
-        notifier.substring(start, notifier.indexOf('Future<void> moveTrack('));
+    final body = notifier.substring(
+      start,
+      notifier.indexOf('Future<void> jumpToIndex('),
+    );
     expect(body, contains('state.entryIds.indexOf(entryId)'));
-    expect(body, contains('audioPlayer.jumpTo(index)'));
+    expect(body, contains('_jumpTo(index)'));
+
+    // Every jump goes to the player and says so in the app's queue at once.
+    final jump = notifier.substring(
+      notifier.indexOf('Future<void> _jumpTo('),
+      notifier.indexOf('Future<void> jumpToTrack('),
+    );
+    expect(jump, contains('audioPlayer.jumpTo(index)'));
+    expect(jump, contains('state = state.copyWith(currentIndex: index)'));
   });
 }

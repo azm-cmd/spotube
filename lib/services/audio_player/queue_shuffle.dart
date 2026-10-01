@@ -140,11 +140,14 @@ class QueueShuffler<T> {
   /// queue itself is already in its shuffled order; this only makes the app
   /// report "shuffled" again and remember the order to go back to.
   Future<void> restore(List<String> orderBeforeShuffle) {
-    return sync.exclusive(() async {
-      _doneInDart = true;
-      _orderBeforeShuffle = List.unmodifiable(orderBeforeShuffle);
-      port.publishShuffle(true);
-    });
+    return sync.exclusive(() async => restoreNow(orderBeforeShuffle));
+  }
+
+  /// [restore] for a caller that already holds [GroupedQueueSync.exclusive].
+  void restoreNow(List<String> orderBeforeShuffle) {
+    _doneInDart = true;
+    _orderBeforeShuffle = List.unmodifiable(orderBeforeShuffle);
+    port.publishShuffle(true);
   }
 
   /// Switches shuffle on or off. [read] gives the current queue and [commit]

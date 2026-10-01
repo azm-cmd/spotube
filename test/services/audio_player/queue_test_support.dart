@@ -52,6 +52,11 @@ class FakeMpv implements QueuePlayerPort {
   /// Pretend a `playlist-move` succeeded without doing anything.
   bool ignoreMoves = false;
 
+  /// Awaited before every command is carried out: a test holds the player
+  /// here to put other changes in the queue behind the one in flight, or to
+  /// make commands take different times.
+  Future<void> Function(String command)? gate;
+
   int _moves = 0;
   int? _failAtMove;
 
@@ -71,6 +76,7 @@ class FakeMpv implements QueuePlayerPort {
 
   @override
   Future<void> moveTrack(int from, int to) async {
+    await gate?.call('move $from $to');
     commands.add('move $from $to');
     _moves++;
     if (_failAtMove == _moves) throw StateError('mpv refused the move');
@@ -85,7 +91,10 @@ class FakeMpv implements QueuePlayerPort {
 
   @override
   Future<void> removeTrack(int index) async {
+    await gate?.call('remove $index');
     commands.add('remove $index');
+    _removes++;
+    if (_failAtRemove == _removes) throw StateError('mpv refused the remove');
     final slot = playlist.removeAt(index);
     if (slot == playing) {
       playing =
@@ -93,6 +102,12 @@ class FakeMpv implements QueuePlayerPort {
     }
     onReport?.call();
   }
+
+  int _removes = 0;
+  int? _failAtRemove;
+
+  /// Throw on the [n]-th remove from now on (1 = the next one).
+  void failRemoveNumber(int n) => _failAtRemove = _removes + n;
 
   int _inserts = 0;
   int? _failAtInsert;
@@ -108,7 +123,9 @@ class FakeMpv implements QueuePlayerPort {
     required bool append,
   }) async {
     // What the app asked for, not what it came to: appending is its own call.
-    commands.add(append ? 'append' : 'insert $index');
+    final command = append ? 'append' : 'insert $index';
+    await gate?.call(command);
+    commands.add(command);
     _inserts++;
     if (_failAtInsert == _inserts) throw StateError('mpv refused the insert');
     RangeError.checkValueInInterval(index, 0, playlist.length, 'index');
@@ -117,10 +134,24 @@ class FakeMpv implements QueuePlayerPort {
     onReport?.call();
   }
 
+  /// Like the real player, tell the app about a change of the playing entry a
+  /// little later, not at once: for a few turns of the event loop the app
+  /// still has the old position.
+  bool delayedPlayingReports = false;
+
   /// The user (or auto-advance) switches to another entry.
   void jump(int index) {
     playing = playlist[index];
-    onReport?.call();
+    if (!delayedPlayingReports) {
+      onReport?.call();
+      return;
+    }
+    () async {
+      for (var i = 0; i < 6; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      onReport?.call();
+    }();
   }
 
   /// A change the app did not ask for, e.g. a shuffle done by the player.
@@ -142,14 +173,25 @@ class QueueRig {
     ];
     mpv = FakeMpv(entries);
     if (entries.isNotEmpty) mpv.playing = mpv.playlist[playing];
-    snapshot = QueueSnapshot(GroupedQueue.ungrouped(entries), playing);
+    _snapshot = QueueSnapshot(GroupedQueue.ungrouped(entries), playing);
     sync = GroupedQueueSync(port: mpv, keyOf: (TestTrack t) => t.id);
     mpv.onReport = deliverReport;
   }
 
   late final FakeMpv mpv;
   late final GroupedQueueSync<TestTrack> sync;
-  late QueueSnapshot<TestTrack> snapshot;
+  late QueueSnapshot<TestTrack> _snapshot;
+
+  /// The flat order of every queue the app has shown, in order: each time the
+  /// app's queue is replaced, what it was replaced by is added here.
+  final history = <List<String>>[];
+
+  QueueSnapshot<TestTrack> get snapshot => _snapshot;
+
+  set snapshot(QueueSnapshot<TestTrack> value) {
+    _snapshot = value;
+    history.add([for (final e in value.queue.entries) e.id]);
+  }
 
   int reportsSeen = 0;
   int reportsIgnored = 0;
@@ -198,6 +240,55 @@ class QueueRig {
   }
 
   int _added = 0;
+
+  /// The notifier's flat `moveTrack`: the entries are named now, the move
+  /// waits its turn.
+  Future<void> moveFlat(int oldIndex, int newIndex) {
+    final entries = snapshot.queue.entries;
+    if (!canMoveEntry(entries.length, oldIndex, newIndex)) {
+      return Future<void>.value();
+    }
+    return moveBefore(
+      entries[oldIndex].id,
+      newIndex >= entries.length ? null : entries[newIndex].id,
+    );
+  }
+
+  /// The move itself, for entries that are already named.
+  Future<void> moveBefore(String movedId, String? beforeId) =>
+      run((q) => q.moveEntryBefore(movedId, beforeId));
+
+  /// The notifier's `jumpToEntry`.
+  Future<void> jumpToEntry(String entryId) {
+    return sync.exclusive(() async {
+      final index = [for (final e in queue.entries) e.id].indexOf(entryId);
+      if (index == -1) return;
+      await mpv.gate?.call('jump $index');
+      mpv.jump(index);
+      // The app's queue says at once which entry plays.
+      snapshot = QueueSnapshot(queue, index);
+    });
+  }
+
+  /// The notifier's `swapActiveSource`: the player's item of the playing entry
+  /// is replaced by a new one for the same entry.
+  Future<void> swapActive() {
+    return sync.exclusive(() async {
+      final from = snapshot;
+      final playingId = from.currentEntryId;
+      if (playingId == null) return;
+      final entry = from.queue.entries[from.currentIndex];
+      await sync.swapInPlace(
+        from,
+        swap: (playingIndex) async {
+          await mpv.insertTrack(playingIndex + 1, entry, append: false);
+          mpv.jump(playingIndex + 1);
+          await mpv.removeTrack(playingIndex);
+        },
+        commit: (confirmed) => snapshot = confirmed,
+      );
+    });
+  }
 
   /// The notifier's `_changeGroups`.
   Future<void> run(TestQueue Function(TestQueue queue) change) {

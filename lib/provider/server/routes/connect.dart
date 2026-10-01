@@ -198,7 +198,7 @@ class ServerConnectRoutes {
                 });
 
                 event.onJump((event) async {
-                  await audioPlayer.jumpTo(event.data);
+                  await audioPlayerNotifier.jumpToIndex(event.data);
                 });
 
                 event.onSeek((event) async {

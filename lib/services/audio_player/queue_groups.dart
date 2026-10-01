@@ -773,6 +773,25 @@ class GroupedQueue<T> {
     );
   }
 
+  /// Moves the entry [entryId] so that it sits right before the entry
+  /// [beforeEntryId] (or at the end when that is `null`): a plain move of one
+  /// track in the flat queue, named by entry ids instead of positions so that
+  /// it still means the same entries after other changes.
+  ///
+  /// It is not group-aware: a group that the move breaks up is dissolved, its
+  /// entries staying where they are (see [followPlayer]). Nothing happens if
+  /// either entry is not in the queue any more, or the move would change
+  /// nothing.
+  GroupedQueue<T> moveEntryBefore(String entryId, String? beforeEntryId) {
+    final from = entries.indexWhere((entry) => entry.id == entryId);
+    final to = beforeEntryId == null
+        ? entries.length
+        : entries.indexWhere((entry) => entry.id == beforeEntryId);
+    // Right before itself, or before the entry that follows it, is where it is.
+    if (from == -1 || to == -1 || to == from || to == from + 1) return this;
+    return followPlayer(moveEntry(entries, from, to));
+  }
+
   // --- Following the player --------------------------------------------------------
 
   /// The queue after the player reports [playerEntries] as its order: the

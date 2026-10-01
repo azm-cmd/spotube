@@ -312,6 +312,48 @@ class GroupedQueueSync<T> {
     }
   }
 
+  /// Replaces the player's playlist item of the playing entry by a fresh one,
+  /// without changing the queue: the entry keeps its id, its place and its
+  /// group. [swap] sends the player commands (the new item goes in right after
+  /// the playing one, playback moves on to it, the old item is removed).
+  ///
+  /// The player's reports while that happens (one item too many) are ignored.
+  /// If the player ends up with a different order or playing position, it is
+  /// the truth.
+  Future<void> swapInPlace(
+    QueueSnapshot<T> from, {
+    required Future<void> Function(int playingIndex) swap,
+    required void Function(QueueSnapshot<T> confirmed) commit,
+  }) async {
+    _applying++;
+    try {
+      Object? failure;
+      StackTrace? failureStack;
+      try {
+        await swap(from.currentIndex);
+      } catch (error, stack) {
+        failure = error;
+        failureStack = stack;
+      }
+
+      final keys = [for (final e in from.queue.entries) keyOf(e.track)];
+      final playerKeys = port.playlistKeys;
+      if (failure != null ||
+          !_sameSequence(playerKeys, keys) ||
+          port.currentIndex != from.currentIndex) {
+        commit(mirror(from, playerKeys, port.currentIndex));
+      }
+
+      await Future<void>.delayed(Duration.zero);
+
+      if (failure != null) {
+        Error.throwWithStackTrace(failure, failureStack!);
+      }
+    } finally {
+      _applying--;
+    }
+  }
+
   Future<void> _reorder(
     QueueSnapshot<T> from,
     GroupedQueue<T> target,
@@ -396,9 +438,37 @@ class GroupedQueueSync<T> {
     ));
 
     // Intermediate reports are longer than the committed queue, so they are
-    // ignored by length; the last one confirms it.
-    for (final index in indexes) {
-      await port.removeTrack(index);
+    // ignored by length; the last one confirms it. They are ignored outright
+    // while the commands are sent, like for the other changes.
+    _applying++;
+    try {
+      Object? failure;
+      StackTrace? failureStack;
+      try {
+        for (final index in indexes) {
+          await port.removeTrack(index);
+        }
+      } catch (error, stack) {
+        failure = error;
+        failureStack = stack;
+      }
+
+      final targetKeys = [for (final e in target.entries) keyOf(e.track)];
+      final playerKeys = port.playlistKeys;
+      if (failure != null || !_sameSequence(playerKeys, targetKeys)) {
+        // The player is not where it was asked to be: it is the truth. Entries
+        // are matched against the queue from before, which still has the ones
+        // the player did not manage to remove.
+        commit(mirror(from, playerKeys, port.currentIndex));
+      }
+
+      await Future<void>.delayed(Duration.zero);
+
+      if (failure != null) {
+        Error.throwWithStackTrace(failure, failureStack!);
+      }
+    } finally {
+      _applying--;
     }
   }
 
