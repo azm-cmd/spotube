@@ -751,6 +751,52 @@ class GroupedQueue<T> {
     );
   }
 
+  // --- Following the player --------------------------------------------------------
+
+  /// The queue after the player reports [playerEntries] as its order: the
+  /// same entries reordered, or fewer of them.
+  ///
+  /// The player is the playback order, so the entries are taken as they are and
+  /// the groups adapt, never the other way round:
+  ///  * members that are no longer in the queue are dropped from their group;
+  ///  * a group with no members left disappears;
+  ///  * a group whose remaining members are no longer one unbroken block is
+  ///    dissolved (its entries stay, just loose);
+  ///  * a group that is still a block keeps its members in the order the player
+  ///    now has them.
+  ///
+  /// The result always satisfies [validate] when [playerEntries] have unique
+  /// ids.
+  GroupedQueue<T> followPlayer(List<QueueEntry<T>> playerEntries) {
+    final position = <String, int>{
+      for (var i = 0; i < playerEntries.length; i++) playerEntries[i].id: i,
+    };
+
+    final claimed = <String>{};
+    final kept = <(int, QueueGroup)>[];
+    for (final group in groups) {
+      final present = [
+        for (final id in group.memberIds)
+          if (position.containsKey(id)) id,
+      ]..sort((a, b) => position[a]!.compareTo(position[b]!));
+
+      final positions = [for (final id in present) position[id]!];
+      if (present.isEmpty ||
+          !isContiguous(positions) ||
+          present.any(claimed.contains)) {
+        continue;
+      }
+      claimed.addAll(present);
+      kept.add((positions.first, group.copyWith(memberIds: present)));
+    }
+    kept.sort((a, b) => a.$1.compareTo(b.$1));
+
+    return GroupedQueue(
+      List.unmodifiable(playerEntries),
+      List.unmodifiable([for (final (_, group) in kept) group]),
+    );
+  }
+
   // --- Internals ------------------------------------------------------------------
 
   /// [index] moved to the end of the group it is inside of, if any.

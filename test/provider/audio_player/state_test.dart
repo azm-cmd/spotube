@@ -1,6 +1,7 @@
 import 'package:media_kit/media_kit.dart' hide Track;
 import 'package:spotube/models/metadata/metadata.dart';
 import 'package:spotube/provider/audio_player/state.dart';
+import 'package:spotube/services/audio_player/queue_groups.dart';
 import 'package:spotube/services/audio_player/queue_operations.dart';
 import 'package:test/test.dart';
 
@@ -116,6 +117,80 @@ void main() {
 
       expect(restored.tracks.map((t) => t.id), ['a', 'b']);
       expect(restored.entryIds, isEmpty);
+    });
+
+    test('a new state has no groups', () {
+      expect(_emptyState().groups, isEmpty);
+    });
+
+    test('withGroupedQueue keeps tracks, entry ids and groups in step', () {
+      var n = 0;
+      final entries = createEntries(
+          [_track('a'), _track('a'), _track('b')], () => 'e${++n}');
+      final queue = GroupedQueue.ungrouped(entries)
+          .createGroup(groupId: 'G', title: 'T', entryIds: ['e1', 'e2']);
+
+      final state = _emptyState().withGroupedQueue(queue);
+
+      expect(state.tracks.map((t) => t.id), ['a', 'a', 'b']);
+      expect(state.entryIds, ['e1', 'e2', 'e3']);
+      expect(state.groups.single.memberIds, ['e1', 'e2']);
+    });
+
+    test('groupedQueue returns what was put in', () {
+      var n = 0;
+      final entries = createEntries(
+          [_track('a'), _track('b'), _track('c')], () => 'e${++n}');
+      final queue = GroupedQueue.ungrouped(entries)
+          .createGroup(groupId: 'G', title: 'T', entryIds: ['e2', 'e3']);
+
+      final back = _emptyState().withGroupedQueue(queue).groupedQueue;
+
+      expect(back.entries.map((e) => e.id), ['e1', 'e2', 'e3']);
+      expect(back.groups, queue.groups);
+      expect(back.validate(), isEmpty);
+    });
+
+    test('groupedQueue refuses a state whose ids do not line up', () {
+      // e.g. one read from the Connect JSON, which carries no ids
+      final fromJson = AudioPlayerState.fromJson(
+        _emptyState()
+            .withEntries(createEntries([_track('a')], () => 'e1'))
+            .toJson(),
+      );
+      expect(() => fromJson.groupedQueue, throwsArgumentError);
+    });
+
+    test('changing other fields keeps the groups', () {
+      var n = 0;
+      final queue = GroupedQueue.ungrouped(
+              createEntries([_track('a'), _track('b')], () => 'e${++n}'))
+          .createGroup(groupId: 'G', title: 'T', entryIds: ['e1', 'e2']);
+
+      final state = _emptyState()
+          .withGroupedQueue(queue)
+          .copyWith(currentIndex: 1, playing: true);
+
+      expect(state.groups.single.id, 'G');
+    });
+
+    test('groups are not part of the Connect JSON either', () {
+      var n = 0;
+      final queue = GroupedQueue.ungrouped(
+              createEntries([_track('a'), _track('b')], () => 'e${++n}'))
+          .createGroup(groupId: 'G', title: 'T', entryIds: ['e1', 'e2']);
+
+      final json = _emptyState().withGroupedQueue(queue).toJson();
+
+      expect(json.keys.toSet(), {
+        'playing',
+        'loopMode',
+        'shuffled',
+        'collections',
+        'currentIndex',
+        'tracks',
+      });
+      expect(AudioPlayerState.fromJson(json).groups, isEmpty);
     });
   });
 }

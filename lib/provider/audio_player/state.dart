@@ -1,6 +1,7 @@
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:media_kit/media_kit.dart' hide Track;
 import 'package:spotube/models/metadata/metadata.dart';
+import 'package:spotube/services/audio_player/queue_groups.dart';
 import 'package:spotube/services/audio_player/queue_operations.dart';
 
 part 'state.freezed.dart';
@@ -20,6 +21,9 @@ class AudioPlayerState with _$AudioPlayerState {
     @JsonKey(includeFromJson: false, includeToJson: false)
     @Default([])
     List<String> entryIds,
+    @JsonKey(includeFromJson: false, includeToJson: false)
+    @Default([])
+    List<QueueGroup> groups,
   }) = _AudioPlayerState;
 
   factory AudioPlayerState({
@@ -30,6 +34,7 @@ class AudioPlayerState with _$AudioPlayerState {
     int currentIndex = 0,
     List<SpotubeTrackObject> tracks = const [],
     List<String> entryIds = const [],
+    List<QueueGroup> groups = const [],
   }) {
     assert(
       tracks.every((track) =>
@@ -45,6 +50,7 @@ class AudioPlayerState with _$AudioPlayerState {
       tracks: tracks,
       collections: collections,
       entryIds: entryIds,
+      groups: groups,
     );
   }
 
@@ -53,6 +59,10 @@ class AudioPlayerState with _$AudioPlayerState {
 
   /// Replaces the queue with [entries], keeping [tracks] and [entryIds] in
   /// step. Prefer this over assigning either list on its own.
+  ///
+  /// [groups] is left as it is, so only use this for changes that cannot break
+  /// a group: appending, or inserting before every group. Anything else goes
+  /// through [withGroupedQueue].
   ///
   /// [entryIds] holds the identity of every queue occurrence, aligned with
   /// [tracks]: `entryIds[i]` belongs to `tracks[i]`, and two copies of the same
@@ -65,6 +75,26 @@ class AudioPlayerState with _$AudioPlayerState {
     return copyWith(
       tracks: [for (final entry in queue) entry.track],
       entryIds: [for (final entry in queue) entry.id],
+    );
+  }
+
+  /// The queue as a [GroupedQueue]: [tracks] with their [entryIds], and the
+  /// [groups] that name blocks of it. Only meaningful for a state that tracks
+  /// entry ids (the local player's, not one read from JSON); throws an
+  /// [ArgumentError] when ids and tracks do not line up.
+  ///
+  /// [groups] holds the grouping of the flat [tracks] order. It is empty for a
+  /// queue without groups, and is not part of the JSON.
+  GroupedQueue<SpotubeTrackObject> get groupedQueue =>
+      GroupedQueue(pairEntries(tracks, entryIds), groups);
+
+  /// Replaces the whole queue, including its groups, keeping [tracks],
+  /// [entryIds] and [groups] in step.
+  AudioPlayerState withGroupedQueue(GroupedQueue<SpotubeTrackObject> queue) {
+    return copyWith(
+      tracks: [for (final entry in queue.entries) entry.track],
+      entryIds: [for (final entry in queue.entries) entry.id],
+      groups: queue.groups,
     );
   }
 

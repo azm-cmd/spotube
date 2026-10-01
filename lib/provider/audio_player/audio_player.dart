@@ -13,7 +13,9 @@ import 'package:spotube/provider/database/database.dart';
 import 'package:spotube/provider/discord_provider.dart';
 import 'package:spotube/provider/server/track_sources.dart';
 import 'package:spotube/services/audio_player/audio_player.dart';
+import 'package:spotube/services/audio_player/queue_groups.dart';
 import 'package:spotube/services/audio_player/queue_operations.dart';
+import 'package:spotube/services/audio_player/queue_sync.dart';
 import 'package:spotube/services/logger/logger.dart';
 import 'package:uuid/uuid.dart';
 
@@ -41,6 +43,22 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     }
     return pairEntries(state.tracks, state.entryIds);
   }
+
+  /// The queue with its groups. Groups only mean something while the ids line
+  /// up with the tracks, so they are dropped together with re-issued ids.
+  GroupedQueue<SpotubeTrackObject> get _grouped {
+    final aligned = state.entryIds.length == state.tracks.length;
+    return GroupedQueue(_entries, aligned ? state.groups : const []);
+  }
+
+  QueueSnapshot<SpotubeTrackObject> get _snapshot =>
+      QueueSnapshot(_grouped, state.currentIndex);
+
+  /// Sends queue changes to the player and mirrors the player back.
+  late final GroupedQueueSync<SpotubeTrackObject> _sync = GroupedQueueSync(
+    port: _AudioPlayerPort(),
+    keyOf: (track) => track.id,
+  );
 
   void _assertAllowedTracks(Iterable<SpotubeTrackObject> tracks) {
     assert(
@@ -100,7 +118,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       // list of tracks, so every restored track becomes a new entry.
       state = state
           .withEntries(createEntries(tracks, _newEntryId))
-          .copyWith(currentIndex: currentIndex);
+          .copyWith(currentIndex: currentIndex, groups: []);
       await audioPlayer.openPlaylist(
         tracks.asMediaList(),
         initialIndex: currentIndex,
@@ -169,32 +187,37 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       }),
       audioPlayer.playlistStream.listen((playlist) async {
         try {
+          final current = _snapshot;
           // Playlist and state has to be in sync. This is only meant for
-          // the shuffle/re-ordering indices to be in sync
-          if (playlist.medias.length != state.tracks.length) {
-            AppLogger.log.w(
-              "Playlist length does not match state tracks length. Ignoring... "
-              "Playlist length: ${playlist.medias.length}, "
-              "State tracks length: ${state.tracks.length}",
-            );
+          // the shuffle/re-ordering indices to be in sync.
+          //
+          // Entries are matched at most once, so copies of the same track stay
+          // separate entries, and groups follow the order the player reports.
+          // While a group operation is moving entries, what the player reports
+          // is an intermediate order: that operation commits the result itself.
+          final next = _sync.onPlayerPlaylist(
+            current,
+            [
+              for (final media in playlist.medias)
+                TrackSourceQuery.parseUri(media.uri).id,
+            ],
+            playlist.index,
+          );
+          if (next == null) {
+            if (!_sync.isApplying) {
+              AppLogger.log.w(
+                "Playlist length does not match state tracks length. Ignoring... "
+                "Playlist length: ${playlist.medias.length}, "
+                "State tracks length: ${state.tracks.length}",
+              );
+            }
             return;
           }
 
-          // Every entry is matched at most once, so copies of the same track
-          // stay separate entries instead of all becoming the first copy.
-          final current = _entries;
-          final entries = reconcileEntries(
-            current,
-            playlist.medias.map(
-              (media) => TrackSourceQuery.parseUri(media.uri).id,
-            ),
-            (track) => track.id,
-          );
-
-          if (entries.length != current.length) {
+          if (next.queue.entries.length != current.queue.entries.length) {
             AppLogger.log.w("Mismatch in tracks after reordering/shuffling.");
-            final keptIds = entries.map((entry) => entry.id).toSet();
-            final missingTracks = current
+            final keptIds = next.queue.entries.map((entry) => entry.id).toSet();
+            final missingTracks = current.queue.entries
                 .where((entry) => !keptIds.contains(entry.id))
                 .map((entry) => entry.track)
                 .toList();
@@ -203,8 +226,8 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
             );
           }
 
-          state = state.withEntries(entries).copyWith(
-                currentIndex: playlist.index,
+          state = state.withGroupedQueue(next.queue).copyWith(
+                currentIndex: next.currentIndex,
               );
 
           await _updatePlayerState(
@@ -356,7 +379,11 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
     if (index == -1) return;
 
-    state = state.withEntries(removeIndexes(_entries, [index]));
+    // The flat result is what it always was; groups lose the removed member.
+    final queue = _grouped;
+    state = state.withGroupedQueue(
+      queue.followPlayer(removeIndexes(queue.entries, [index])),
+    );
 
     await audioPlayer.removeTrack(index);
 
@@ -370,7 +397,8 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
   Future<void> removeTracks(Iterable<String> trackIds) async {
     final idsToRemove = trackIds.toSet();
-    final entries = _entries;
+    final queue = _grouped;
+    final entries = queue.entries;
 
     // Positions in the queue as it is *now*. They are removed back to front
     // so that each removal leaves the positions of the remaining ones intact.
@@ -379,7 +407,10 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       entries.length,
     );
 
-    state = state.withEntries(removeIndexes(entries, trackIndexes));
+    // Groups lose the removed members (and disappear once empty).
+    state = state.withGroupedQueue(
+      queue.followPlayer(removeIndexes(entries, trackIndexes)),
+    );
 
     for (final index in trackIndexes) {
       await audioPlayer.removeTrack(index);
@@ -440,6 +471,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         .copyWith(
           currentIndex: initialIndex,
           collections: [],
+          groups: [],
         );
 
     await audioPlayer.openPlaylist(
@@ -483,15 +515,137 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     // The player only reports track ids back, so it could not tell two copies
     // of a track apart. The move is applied to the entries here, and the
     // player's report afterwards just confirms it.
-    state = state.withEntries(moveEntry(_entries, oldIndex, newIndex));
+    //
+    // A plain move of one track is not group-aware: a group it breaks up is
+    // dissolved (its tracks stay), see GroupedQueue.followPlayer.
+    state = state.withGroupedQueue(
+      _grouped.followPlayer(moveEntry(_entries, oldIndex, newIndex)),
+    );
 
     await audioPlayer.moveTrack(oldIndex, newIndex);
+  }
+
+  // --- Queue groups -----------------------------------------------------------
+  //
+  // `tracks` stays the flat playback order and the groups name contiguous
+  // blocks of it. Every method works out the queue it wants with GroupedQueue,
+  // then makes the player follow without interrupting playback and commits the
+  // confirmed result. Entries are named by entry id (see
+  // AudioPlayerState.entryIds), never by track id. A request that cannot be
+  // honoured (unknown or stale id, entry already grouped, ...) throws a
+  // QueueGroupError before anything is changed.
+
+  String _newGroupId() => _uuid.v4();
+
+  Future<void> _changeGroups(
+    GroupedQueue<SpotubeTrackObject> Function(
+      GroupedQueue<SpotubeTrackObject> queue,
+    ) change,
+  ) {
+    return _sync.exclusive(() async {
+      final from = _snapshot;
+      final target = change(from.queue);
+
+      await _sync.apply(
+        from,
+        target,
+        commit: (confirmed) {
+          state = state.withGroupedQueue(confirmed.queue).copyWith(
+                currentIndex: confirmed.currentIndex,
+              );
+        },
+      );
+
+      // Only the order of the queue is saved, so a change that left the order
+      // alone (rename, collapse, ungroup) has nothing to write.
+      if (!sameEntryOrder(from.queue.entries, target.entries)) {
+        await _updatePlayerState(
+          AudioPlayerStateTableCompanion(
+            tracks: Value(state.tracks),
+            currentIndex: Value(max(state.currentIndex, 0)),
+          ),
+        );
+      }
+    });
+  }
+
+  /// Groups the loose entries [entryIds] into a new, collapsed group and
+  /// returns its id. The entries are gathered into one block where the first
+  /// of them was.
+  Future<String> createGroup({
+    required String title,
+    required Iterable<String> entryIds,
+    bool collapsed = true,
+  }) async {
+    final groupId = _newGroupId();
+    await _changeGroups(
+      (queue) => queue.createGroup(
+        groupId: groupId,
+        title: title,
+        entryIds: entryIds,
+        collapsed: collapsed,
+      ),
+    );
+    return groupId;
+  }
+
+  /// Adds loose entries to a group, moving them next to it. [index] is the
+  /// position among the group's members (default: the end).
+  Future<void> addToGroup(
+    String groupId,
+    Iterable<String> entryIds, {
+    int? index,
+  }) {
+    return _changeGroups(
+      (queue) => queue.addToGroup(groupId, entryIds, index: index),
+    );
+  }
+
+  /// Takes entries out of their groups. They stay in the queue.
+  Future<void> removeFromGroup(Iterable<String> entryIds) {
+    return _changeGroups((queue) => queue.removeFromGroup(entryIds));
+  }
+
+  /// Dissolves a group. Its entries stay in the queue, in place.
+  Future<void> ungroup(String groupId) {
+    return _changeGroups((queue) => queue.ungroup(groupId));
+  }
+
+  Future<void> renameGroup(String groupId, String title) {
+    return _changeGroups((queue) => queue.renameGroup(groupId, title));
+  }
+
+  Future<void> setGroupCollapsed(String groupId, bool collapsed) {
+    return _changeGroups((queue) => queue.setCollapsed(groupId, collapsed));
+  }
+
+  /// Moves a whole group before the top-level row at [toItemIndex] (see
+  /// GroupedQueue.items; the length means "to the end").
+  Future<void> moveGroup(String groupId, int toItemIndex) {
+    return _changeGroups((queue) => queue.moveGroup(groupId, toItemIndex));
+  }
+
+  /// Moves one top-level row (a loose entry or a whole group).
+  Future<void> moveQueueItem(int fromItemIndex, int toItemIndex) {
+    return _changeGroups((queue) => queue.moveItem(fromItemIndex, toItemIndex));
+  }
+
+  /// Reorders inside a group; nothing outside it moves.
+  Future<void> moveWithinGroup(String groupId, int from, int to) {
+    return _changeGroups((queue) => queue.moveWithinGroup(groupId, from, to));
+  }
+
+  /// Removes entries from the queue by entry id, and from their groups. A
+  /// group that loses all its members disappears. Unknown ids are ignored.
+  Future<void> removeEntries(Iterable<String> entryIds) {
+    return _changeGroups((queue) => queue.removeEntries(entryIds));
   }
 
   Future<void> stop() async {
     state = state.copyWith(
       tracks: [],
       entryIds: [],
+      groups: [],
       currentIndex: 0,
       collections: [],
       loopMode: PlaylistMode.none,
@@ -511,6 +665,26 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     );
     ref.read(discordProvider.notifier).clear();
   }
+}
+
+/// The real player, as [GroupedQueueSync] sees it.
+class _AudioPlayerPort implements QueuePlayerPort {
+  @override
+  Future<void> moveTrack(int from, int to) => audioPlayer.moveTrack(from, to);
+
+  @override
+  Future<void> removeTrack(int index) => audioPlayer.removeTrack(index);
+
+  // Note: media_kit keeps its own copy of the playlist and updates it as it
+  // sends each command, so this is that copy, not a fresh read of libmpv.
+  @override
+  List<String> get playlistKeys => [
+        for (final media in audioPlayer.playlist.medias)
+          TrackSourceQuery.parseUri(media.uri).id,
+      ];
+
+  @override
+  int get currentIndex => audioPlayer.currentIndex;
 }
 
 final audioPlayerProvider =

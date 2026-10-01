@@ -1020,4 +1020,121 @@ void main() {
       }
     });
   });
+
+  group('followPlayer (the player decides the order, groups adapt)', () {
+    List<QueueEntry<_Track>> order(_Queue queue, List<String> ids) {
+      final byId = {for (final e in queue.entries) e.id: e};
+      return [for (final id in ids) byId[id]!];
+    }
+
+    test('an unchanged order keeps every group as it is', () {
+      final queue = _mixed();
+      final next = queue.followPlayer(queue.entries);
+      expect(_shape(next), _shape(queue));
+      expect(next.groups, queue.groups);
+    });
+
+    test('a group that stays together moves with the player\'s order', () {
+      final queue = _mixed();
+      final next = queue.followPlayer(
+          order(queue, ['e8', 'e6', 'e7', 'e2', 'e3', 'e4', 'e5', 'e1']));
+
+      expect(_shape(next), ['e8', 'G2[e6,e7]', 'G1[e2,e3,e4]', 'e5', 'e1']);
+      expect(next.groups.map((g) => g.id), ['G2', 'G1']);
+      expect(next.validate(), isEmpty);
+    });
+
+    test('members take the order the player gives them', () {
+      final queue = _mixed();
+      final next = queue.followPlayer(
+          order(queue, ['e1', 'e4', 'e2', 'e3', 'e5', 'e7', 'e6', 'e8']));
+
+      expect(next.groupById('G1')!.memberIds, ['e4', 'e2', 'e3']);
+      expect(next.groupById('G2')!.memberIds, ['e7', 'e6']);
+      expect(next.validate(), isEmpty);
+    });
+
+    test('a group that is split apart is dissolved, its entries stay', () {
+      final queue = _mixed();
+      final next = queue.followPlayer(
+          order(queue, ['e2', 'e1', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8']));
+
+      expect(next.groupById('G1'), isNull);
+      expect(next.groupById('G2'), isNotNull);
+      expect(_flat(next), ['e2', 'e1', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8']);
+      expect(next.validate(), isEmpty);
+    });
+
+    test('members that left the queue are dropped from their group', () {
+      final queue = _mixed();
+      final next = queue.followPlayer(
+          order(queue, ['e1', 'e2', 'e4', 'e5', 'e6', 'e7', 'e8']));
+
+      expect(next.groupById('G1')!.memberIds, ['e2', 'e4']);
+      expect(next.validate(), isEmpty);
+    });
+
+    test('a group whose members all left disappears', () {
+      final queue = _mixed();
+      final next = queue
+          .followPlayer(order(queue, ['e1', 'e2', 'e3', 'e4', 'e5', 'e8']));
+
+      expect(next.groups.map((g) => g.id), ['G1']);
+      expect(_shape(next), ['e1', 'G1[e2,e3,e4]', 'e5', 'e8']);
+    });
+
+    test('members left on either side of a gap that closed stay a group', () {
+      // e3 left, so e2 and e4 touch: they are still one block.
+      final queue = _mixed();
+      final next = queue.followPlayer(
+          order(queue, ['e1', 'e2', 'e4', 'e5', 'e6', 'e7', 'e8']));
+      expect(_shape(next)[1], 'G1[e2,e4]');
+    });
+
+    test('an emptied queue has no groups', () {
+      final next = _mixed().followPlayer(const []);
+      expect(next.entries, isEmpty);
+      expect(next.groups, isEmpty);
+    });
+
+    test('a queue without groups just takes the order', () {
+      final queue = _base();
+      final next = queue.followPlayer(order(queue, ['e3', 'e1']));
+      expect(_flat(next), ['e3', 'e1']);
+      expect(next.groups, isEmpty);
+    });
+
+    test('works with duplicate track ids: groups follow entry ids', () {
+      final queue = _base()
+          .createGroup(groupId: 'G', title: 'T', entryIds: ['e1', 'e3', 'e5']);
+      // The three copies of "a" come back in another order, still together.
+      final next = queue.followPlayer(
+          order(queue, ['e2', 'e5', 'e1', 'e3', 'e4', 'e6', 'e7', 'e8']));
+      expect(next.groupById('G')!.memberIds, ['e5', 'e1', 'e3']);
+    });
+
+    test('whatever the player reports, the result is a valid queue', () {
+      final random = Random(99);
+      for (var round = 0; round < 300; round++) {
+        var queue = _base();
+        for (var g = 0; g < 1 + random.nextInt(3); g++) {
+          final loose = queue.ungroupedEntries.map((e) => e.id).toList()
+            ..shuffle(random);
+          if (loose.length < 2) break;
+          queue = queue.createGroup(
+              groupId: 'G$g',
+              title: 't',
+              entryIds: loose.take(1 + random.nextInt(3)));
+        }
+        final reported = [...queue.entries]
+          ..shuffle(random)
+          ..removeRange(0, random.nextInt(3));
+
+        final next = queue.followPlayer(reported);
+
+        expect(next.validate(), isEmpty, reason: 'round $round');
+        expect(_flat(next), [for (final e in reported) e.id]);
+      }
+    });
+  });
 }
