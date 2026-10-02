@@ -773,6 +773,65 @@ class GroupedQueue<T> {
     );
   }
 
+  /// The identity of the top-level row at [index] of [items]: `entry:<id>` for
+  /// a loose entry, `group:<id>` for a group; `null` when [index] is past the
+  /// last row (or the queue is not valid). A row keeps its key when other rows
+  /// move, so a position taken now can be turned into a key and used later,
+  /// after other changes, with [moveItemBefore] and [moveMemberBefore].
+  String? itemKeyAt(int index) {
+    final rows = isValid ? _items() : const <QueueItem<Never>>[];
+    if (index < 0 || index >= rows.length) return null;
+    return _keyOf(rows[index]);
+  }
+
+  static String _keyOf(QueueItem<dynamic> row) => switch (row) {
+        EntryItem<dynamic>(:final entry) => 'entry:${entry.id}',
+        GroupItem<dynamic>(:final group) => 'group:${group.id}',
+      };
+
+  /// Moves the top-level row [key] so that it sits right before the row
+  /// [beforeKey] (or at the end when that is `null`): [moveItem] with the rows
+  /// named by what they are instead of where they are.
+  ///
+  /// Nothing happens if either row is gone, or the move would change nothing.
+  GroupedQueue<T> moveItemBefore(String key, String? beforeKey) {
+    _requireValid();
+    final rows = [for (final row in _items()) _keyOf(row)];
+    final from = rows.indexOf(key);
+    final to = beforeKey == null ? rows.length : rows.indexOf(beforeKey);
+    if (from == -1 || to == -1 || to == from || to == from + 1) return this;
+    return moveItem(from, to);
+  }
+
+  /// [moveItemBefore] for the group [groupId]. Throws [QueueGroupError] if the
+  /// group is gone.
+  GroupedQueue<T> moveGroupBefore(String groupId, String? beforeKey) {
+    _requireValid();
+    _requireGroup(groupId);
+    return moveItemBefore('group:$groupId', beforeKey);
+  }
+
+  /// Moves the member [entryId] of the group [groupId] so that it sits right
+  /// before the member [beforeEntryId] (or at the end of the group when that is
+  /// `null`): [moveWithinGroup] with the members named by entry id.
+  ///
+  /// Throws [QueueGroupError] if the group is gone. Nothing happens if either
+  /// entry is not a member any more, or the move would change nothing.
+  GroupedQueue<T> moveMemberBefore(
+    String groupId,
+    String entryId,
+    String? beforeEntryId,
+  ) {
+    _requireValid();
+    final group = _requireGroup(groupId);
+    final from = group.memberIds.indexOf(entryId);
+    final to = beforeEntryId == null
+        ? group.memberIds.length
+        : group.memberIds.indexOf(beforeEntryId);
+    if (from == -1 || to == -1 || to == from || to == from + 1) return this;
+    return moveWithinGroup(groupId, from, to);
+  }
+
   /// Moves the entry [entryId] so that it sits right before the entry
   /// [beforeEntryId] (or at the end when that is `null`): a plain move of one
   /// track in the flat queue, named by entry ids instead of positions so that

@@ -100,6 +100,14 @@ class SpotubeAudioPlayer extends AudioPlayerInterface
     await _mkPlayer.jump(index);
   }
 
+  /// Asks libmpv which playlist entry is the current one (`-1` for none). This
+  /// is the player's own answer after every command sent so far; the position
+  /// in [playlist] is only what its last event said.
+  Future<int> queryPlayingIndex() async {
+    final value = await _mkPlayer.nativePlayer.getProperty('playlist-pos');
+    return int.tryParse(value) ?? -1;
+  }
+
   Future<void> addTrack(mk.Media media) async {
     await _mkPlayer.add(media);
   }

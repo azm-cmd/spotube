@@ -159,8 +159,13 @@ abstract class QueuePlayerPort {
   /// track have the same key.
   List<String> get playlistKeys;
 
-  /// Position of the playing entry in the player's playlist.
+  /// Position of the playing entry in the player's playlist, as the player
+  /// last reported it. A report can still be on its way.
   int get currentIndex;
+
+  /// Asks the player where it is now (`-1` if nowhere). Unlike [currentIndex]
+  /// this is the answer of the player itself, after every command sent so far.
+  Future<int> queryPlayingIndex();
 }
 
 /// A queue together with the position of the playing entry in it.
@@ -199,6 +204,51 @@ class GroupedQueueSync<T> {
     final run = _tail.then((_) => body());
     _tail = run.then<void>((_) {}, onError: (_) {});
     return run;
+  }
+
+  /// Where the player is now: asked, so that a report still on its way, or
+  /// one that was ignored while a change was being sent, cannot leave the app
+  /// with an old position. Falls back to the last report if it can not answer.
+  Future<int> _playerPosition() async {
+    try {
+      return await port.queryPlayingIndex();
+    } catch (_) {
+      return port.currentIndex;
+    }
+  }
+
+  /// [snapshot] with the playing position the player has now.
+  ///
+  /// A change starts from this, not from the app's last known position: the
+  /// track may have ended by itself a moment ago, with the report still on its
+  /// way. (Only meaningful while the player holds exactly this queue.)
+  Future<QueueSnapshot<T>> current(QueueSnapshot<T> snapshot) async {
+    if (port.playlistKeys.length != snapshot.queue.entries.length) {
+      return snapshot;
+    }
+    final at = await _playerPosition();
+    if (at < 0 ||
+        at >= snapshot.queue.entries.length ||
+        at == snapshot.currentIndex) {
+      return snapshot;
+    }
+    return QueueSnapshot(snapshot.queue, at);
+  }
+
+  /// After a change: if the player plays another entry than [shown], the track
+  /// ended by itself while the change was being sent (its report was ignored
+  /// like the others). The player is the truth for what plays.
+  Future<void> _followPlayer(
+    QueueSnapshot<T> shown,
+    void Function(QueueSnapshot<T> confirmed) commit,
+  ) async {
+    final at = await _playerPosition();
+    if (at < 0 ||
+        at >= shown.queue.entries.length ||
+        at == shown.currentIndex) {
+      return;
+    }
+    commit(QueueSnapshot(shown.queue, at));
   }
 
   /// Makes the player follow [target], which is [from] after a group operation.
@@ -296,13 +346,15 @@ class GroupedQueueSync<T> {
 
       final targetKeys = [for (final e in target.entries) keyOf(e.track)];
       final playerKeys = port.playlistKeys;
-      if (failure != null || !_sameSequence(playerKeys, targetKeys)) {
+      final inStep = failure == null && _sameSequence(playerKeys, targetKeys);
+      if (!inStep) {
         // The player is not where it was asked to be: it is the truth.
-        commit(mirror(committed, playerKeys, port.currentIndex));
+        commit(mirror(committed, playerKeys, await _playerPosition()));
       }
 
       // Let reports that are already on their way arrive while still guarded.
       await Future<void>.delayed(Duration.zero);
+      if (inStep) await _followPlayer(committed, commit);
 
       if (failure != null) {
         Error.throwWithStackTrace(failure, failureStack!);
@@ -338,10 +390,15 @@ class GroupedQueueSync<T> {
 
       final keys = [for (final e in from.queue.entries) keyOf(e.track)];
       final playerKeys = port.playlistKeys;
-      if (failure != null ||
-          !_sameSequence(playerKeys, keys) ||
-          port.currentIndex != from.currentIndex) {
-        commit(mirror(from, playerKeys, port.currentIndex));
+      final position = await _playerPosition();
+      final inStep = failure == null && _sameSequence(playerKeys, keys);
+      if (!inStep) {
+        commit(mirror(from, playerKeys, position));
+      } else if (position >= 0 &&
+          position < keys.length &&
+          position != from.currentIndex) {
+        // Playback is on another entry than the one that was swapped.
+        commit(QueueSnapshot(from.queue, position));
       }
 
       await Future<void>.delayed(Duration.zero);
@@ -380,21 +437,25 @@ class GroupedQueueSync<T> {
       final targetKeys = [for (final e in target.entries) keyOf(e.track)];
       final playerKeys = port.playlistKeys;
 
-      if (failure == null && _sameSequence(playerKeys, targetKeys)) {
+      final inStep = failure == null && _sameSequence(playerKeys, targetKeys);
+      QueueSnapshot<T>? shown;
+      if (inStep) {
         final index = playingId == null ? -1 : targetIds.indexOf(playingId);
-        commit(QueueSnapshot(target, index == -1 ? from.currentIndex : index));
+        shown = QueueSnapshot(target, index == -1 ? from.currentIndex : index);
+        commit(shown);
       } else {
         // The player is not where it was asked to be: it is the truth. Entries
         // are matched against the order the app had, as nothing else is known.
         commit(mirror(
           failure == null ? QueueSnapshot(target, from.currentIndex) : from,
           playerKeys,
-          port.currentIndex,
+          await _playerPosition(),
         ));
       }
 
       // Let reports that are already on their way arrive while still guarded.
       await Future<void>.delayed(Duration.zero);
+      if (shown != null) await _followPlayer(shown, commit);
 
       if (failure != null) {
         Error.throwWithStackTrace(failure, failureStack!);
@@ -430,12 +491,13 @@ class GroupedQueueSync<T> {
     );
 
     final keptAt = playingId == null ? -1 : targetIds.indexOf(playingId);
-    commit(QueueSnapshot(
+    final committed = QueueSnapshot(
       target,
       keptAt != -1
           ? keptAt
           : min(max(from.currentIndex, 0), max(targetIds.length - 1, 0)),
-    ));
+    );
+    commit(committed);
 
     // Intermediate reports are longer than the committed queue, so they are
     // ignored by length; the last one confirms it. They are ignored outright
@@ -455,14 +517,16 @@ class GroupedQueueSync<T> {
 
       final targetKeys = [for (final e in target.entries) keyOf(e.track)];
       final playerKeys = port.playlistKeys;
-      if (failure != null || !_sameSequence(playerKeys, targetKeys)) {
+      final inStep = failure == null && _sameSequence(playerKeys, targetKeys);
+      if (!inStep) {
         // The player is not where it was asked to be: it is the truth. Entries
         // are matched against the queue from before, which still has the ones
         // the player did not manage to remove.
-        commit(mirror(from, playerKeys, port.currentIndex));
+        commit(mirror(from, playerKeys, await _playerPosition()));
       }
 
       await Future<void>.delayed(Duration.zero);
+      if (inStep) await _followPlayer(committed, commit);
 
       if (failure != null) {
         Error.throwWithStackTrace(failure, failureStack!);

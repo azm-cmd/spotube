@@ -43,9 +43,9 @@ class _NoBlacklist extends BlackListNotifier {
 }
 
 /// A silent WAV file, long enough that nothing ends while a test runs.
-File writeWav(Directory dir, String name) {
+File writeWav(Directory dir, String name, {int seconds = 120}) {
   const rate = 8000;
-  const samples = rate * 120; // two minutes
+  final samples = rate * seconds;
   final data = ByteData(44 + samples);
   void text(int at, String s) {
     for (var i = 0; i < s.length; i++) {

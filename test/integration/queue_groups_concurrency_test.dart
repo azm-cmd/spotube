@@ -96,9 +96,14 @@ class Jump extends Op {
 
 /// The same changes on a plain queue, one after the other: the entries are
 /// named by track name, so this says what the result has to be.
+///
+/// A change that carries positions (a drag) means the rows at those positions
+/// in the queue as it was when the changes were asked for ([initial]): the app
+/// names them at that moment, however much the changes before it move things.
 class Model {
-  Model(this.queue, this.playing);
+  Model(this.queue, this.playing) : initial = queue;
 
+  final GroupedQueue<String> initial;
   GroupedQueue<String> queue;
   String playing;
 
@@ -124,9 +129,15 @@ class Model {
       case Remove(:final names):
         queue = queue.removeEntries(names);
       case MoveGroupTo(:final title, :final to):
-        queue = queue.moveGroup(_groupId(title), to);
+        queue = queue.moveGroupBefore(_groupId(title), initial.itemKeyAt(to));
       case MoveMember(:final title, :final from, :final to):
-        queue = queue.moveWithinGroup(_groupId(title), from, to);
+        final id = _groupId(title);
+        final members = initial.groupById(id)!.memberIds;
+        queue = queue.moveMemberBefore(
+          id,
+          members[from],
+          to < members.length ? members[to] : null,
+        );
       case Ungroup(:final title):
         queue = queue.ungroup(_groupId(title));
       case Jump(:final name):
@@ -498,7 +509,9 @@ void main() {
                 ]),
               4 => MoveGroupTo(
                   random.nextBool() ? 'One' : 'Two',
-                  random.nextInt(planner.queue.items.length + 1),
+                  // A position in the queue as it is when the changes are asked
+                  // for (the planner has moved on from it).
+                  random.nextInt(s0.groupedQueue.items.length + 1),
                 ),
               5 => MoveMember(random.nextBool() ? 'One' : 'Two',
                   random.nextInt(2), random.nextInt(3)),

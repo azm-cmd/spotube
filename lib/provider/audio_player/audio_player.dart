@@ -68,6 +68,11 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     );
   }
 
+  /// Whether the queue was changed since the notifier was built. The saved
+  /// queue is restored in the background at startup; if something already put
+  /// a newer queue in place by then, the saved one must not replace it.
+  bool _queueTouched = false;
+
   /// Sends queue changes to the player and mirrors the player back.
   late final GroupedQueueSync<SpotubeTrackObject> _sync = GroupedQueueSync(
     port: _AudioPlayerPort(),
@@ -87,7 +92,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   Future<void> _setShuffle(bool shuffle) async {
     final reordered = await _shuffler.setShuffle(
       shuffle,
-      read: () => _snapshot,
+      read: () => _sync.current(_snapshot),
       commit: _commitSnapshot,
     );
     if (reordered) {
@@ -102,6 +107,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   }
 
   void _commitSnapshot(QueueSnapshot<SpotubeTrackObject> confirmed) {
+    _queueTouched = true;
     state = state.withGroupedQueue(confirmed.queue).copyWith(
           currentIndex: confirmed.currentIndex,
         );
@@ -176,6 +182,10 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       // Replacing the queue is a queue change like any other: it waits for the
       // ones in progress and the ones after it wait for it.
       await _sync.exclusive(() async {
+        // A queue that was loaded, changed or cleared while the saved one was
+        // being read is newer than it: the saved queue does not replace it.
+        if (_queueTouched) return;
+
         // The saved queue carries its entry ids and groups; a queue saved
         // before Queue Groups has neither, and gets new ids and no groups.
         state = state
@@ -198,7 +208,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       });
     }
 
-    if (playerState.collections.isNotEmpty) {
+    if (playerState.collections.isNotEmpty && !_queueTouched) {
       state = state.copyWith(
         collections: playerState.collections,
       );
@@ -390,7 +400,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     bool skipQueued = false,
   }) {
     return _sync.exclusive(() async {
-      final from = _snapshot;
+      final from = await _sync.current(_snapshot);
       final length = from.queue.entries.length;
 
       final added = createEntries(
@@ -512,6 +522,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     // Replacing the queue waits for the queue changes in progress, and the
     // ones after it wait for it.
     await _sync.exclusive(() async {
+      _queueTouched = true;
       state = state
           .withEntries(
             // These are filtered tracks as well. Loading replaces the whole
@@ -550,7 +561,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   /// player's playlist in the middle of it.
   Future<void> swapActiveSource() {
     return _sync.exclusive(() async {
-      final from = _snapshot;
+      final from = await _sync.current(_snapshot);
       final active = state.activeTrack;
       if (state.tracks.isEmpty || active is! SpotubeFullTrackObject) return;
 
@@ -577,6 +588,8 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     state = state.copyWith(currentIndex: index);
   }
 
+  /// Plays the first entry of [track]. Prefer [jumpToEntry] when the entry is
+  /// known: a track id does not say which copy is meant.
   Future<void> jumpToTrack(SpotubeTrackObject track) {
     return _sync.exclusive(() async {
       final index =
@@ -596,13 +609,13 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     });
   }
 
-  /// Plays the entry at [index] of the queue as it is when this runs (after
-  /// the queue changes already asked for).
+  /// Plays the entry at [index] of the queue as it is when this is called: the
+  /// entry is named now and played when its turn comes, even if other queue
+  /// changes move it first. (The remote player sends positions.)
   Future<void> jumpToIndex(int index) {
-    return _sync.exclusive(() async {
-      if (index < 0 || index >= state.tracks.length) return;
-      await _jumpTo(index);
-    });
+    final ids = state.entryIds;
+    if (index < 0 || index >= ids.length) return Future<void>.value();
+    return jumpToEntry(ids[index]);
   }
 
   /// Moves the track at [oldIndex] so that it sits where the track at
@@ -644,7 +657,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     ) change,
   ) {
     return _sync.exclusive(() async {
-      final from = _snapshot;
+      final from = await _sync.current(_snapshot);
       final target = change(from.queue);
 
       await _sync.apply(
@@ -715,20 +728,55 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     return _changeGroups((queue) => queue.setCollapsed(groupId, collapsed));
   }
 
+  /// The top-level row at [index] of the queue as it is now, named by key (see
+  /// [GroupedQueue.itemKeyAt]) so that a change that runs later still means
+  /// that row. `null` is the end of the queue; `usable` is false for a position
+  /// that is neither a row nor the end.
+  ({bool usable, String? key}) _rowAt(int index) {
+    final queue = _grouped;
+    if (!queue.isValid) return (usable: false, key: null);
+    final key = queue.itemKeyAt(index);
+    if (key != null) return (usable: true, key: key);
+    return (usable: index == queue.items.length, key: null);
+  }
+
   /// Moves a whole group before the top-level row at [toItemIndex] (see
-  /// GroupedQueue.items; the length means "to the end").
+  /// GroupedQueue.items; the length means "to the end"). The row is named when
+  /// this is called, so the move still means it after other changes run first.
   Future<void> moveGroup(String groupId, int toItemIndex) {
-    return _changeGroups((queue) => queue.moveGroup(groupId, toItemIndex));
+    final before = _rowAt(toItemIndex);
+    return _changeGroups(
+      (queue) => before.usable
+          ? queue.moveGroupBefore(groupId, before.key)
+          : queue.moveGroup(groupId, toItemIndex),
+    );
   }
 
-  /// Moves one top-level row (a loose entry or a whole group).
+  /// Moves one top-level row (a loose entry or a whole group). Both rows are
+  /// named when this is called.
   Future<void> moveQueueItem(int fromItemIndex, int toItemIndex) {
-    return _changeGroups((queue) => queue.moveItem(fromItemIndex, toItemIndex));
+    final moved = _rowAt(fromItemIndex);
+    final before = _rowAt(toItemIndex);
+    return _changeGroups(
+      (queue) => moved.key != null && before.usable
+          ? queue.moveItemBefore(moved.key!, before.key)
+          : queue.moveItem(fromItemIndex, toItemIndex),
+    );
   }
 
-  /// Reorders inside a group; nothing outside it moves.
+  /// Reorders inside a group; nothing outside it moves. The two members are
+  /// named when this is called.
   Future<void> moveWithinGroup(String groupId, int from, int to) {
-    return _changeGroups((queue) => queue.moveWithinGroup(groupId, from, to));
+    final members = _grouped.groupById(groupId)?.memberIds ?? const <String>[];
+    final usable =
+        from >= 0 && from < members.length && to >= 0 && to <= members.length;
+    final movedId = usable ? members[from] : null;
+    final beforeId = usable && to < members.length ? members[to] : null;
+    return _changeGroups(
+      (queue) => usable
+          ? queue.moveMemberBefore(groupId, movedId!, beforeId)
+          : queue.moveWithinGroup(groupId, from, to),
+    );
   }
 
   /// Removes entries from the queue by entry id, and from their groups. A
@@ -739,6 +787,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
   Future<void> stop() {
     return _sync.exclusive(() async {
+      _queueTouched = true;
       state = state.copyWith(
         tracks: [],
         entryIds: [],
@@ -803,6 +852,9 @@ class _AudioPlayerPort implements QueuePlayerPort {
 
   @override
   int get currentIndex => audioPlayer.currentIndex;
+
+  @override
+  Future<int> queryPlayingIndex() => audioPlayer.queryPlayingIndex();
 }
 
 final audioPlayerProvider =

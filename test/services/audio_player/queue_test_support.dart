@@ -71,8 +71,28 @@ class FakeMpv implements QueuePlayerPort {
   @override
   List<String> get playlistKeys => [for (final s in playlist) s.key];
 
+  /// The entry that was playing when the player last reported to the app.
+  FakeSlot? _reportedPlaying;
+
+  void _report() {
+    _reportedPlaying = playing;
+    onReport?.call();
+  }
+
+  /// What the app last heard (like media_kit's own copy of the position): it
+  /// lags behind [playing] while a report is on its way.
   @override
-  int get currentIndex => playing == null ? -1 : playlist.indexOf(playing!);
+  int get currentIndex {
+    final slot = _reportedPlaying != null && playlist.contains(_reportedPlaying)
+        ? _reportedPlaying
+        : playing;
+    return slot == null ? -1 : playlist.indexOf(slot);
+  }
+
+  /// The player's own answer: where it plays now, whatever the app has heard.
+  @override
+  Future<int> queryPlayingIndex() async =>
+      playing == null ? -1 : playlist.indexOf(playing!);
 
   @override
   Future<void> moveTrack(int from, int to) async {
@@ -86,7 +106,7 @@ class FakeMpv implements QueuePlayerPort {
       final slot = playlist.removeAt(from);
       playlist.insert(from < to ? to - 1 : to, slot);
     }
-    onReport?.call();
+    _report();
   }
 
   @override
@@ -100,7 +120,7 @@ class FakeMpv implements QueuePlayerPort {
       playing =
           playlist.isEmpty ? null : playlist[min(index, playlist.length - 1)];
     }
-    onReport?.call();
+    _report();
   }
 
   int _removes = 0;
@@ -131,7 +151,7 @@ class FakeMpv implements QueuePlayerPort {
     RangeError.checkValueInInterval(index, 0, playlist.length, 'index');
     playlist.insert(index, FakeSlot(entry.id, entry.track.id));
     playing ??= playlist.first;
-    onReport?.call();
+    _report();
   }
 
   /// Like the real player, tell the app about a change of the playing entry a
@@ -139,18 +159,23 @@ class FakeMpv implements QueuePlayerPort {
   /// still has the old position.
   bool delayedPlayingReports = false;
 
+  /// The track ends by itself and the player goes on to the entry at [index].
+  /// Like a jump, the app hears about it a little later when
+  /// [delayedPlayingReports] is on.
+  void advanceTo(int index) => jump(index);
+
   /// The user (or auto-advance) switches to another entry.
   void jump(int index) {
     playing = playlist[index];
     if (!delayedPlayingReports) {
-      onReport?.call();
+      _report();
       return;
     }
     () async {
       for (var i = 0; i < 6; i++) {
         await Future<void>.delayed(Duration.zero);
       }
-      onReport?.call();
+      _report();
     }();
   }
 
@@ -160,7 +185,7 @@ class FakeMpv implements QueuePlayerPort {
     playlist
       ..clear()
       ..addAll([for (final id in entryIdOrder) byId[id]!]);
-    onReport?.call();
+    _report();
   }
 }
 
@@ -220,7 +245,7 @@ class QueueRig {
     bool afterPlaying = false,
   }) {
     return sync.exclusive(() async {
-      final from = snapshot;
+      final from = await sync.current(snapshot);
       final length = from.queue.entries.length;
       final added = [
         for (final id in trackIds) QueueEntry('n${++_added}', TestTrack(id)),
@@ -274,7 +299,7 @@ class QueueRig {
   /// is replaced by a new one for the same entry.
   Future<void> swapActive() {
     return sync.exclusive(() async {
-      final from = snapshot;
+      final from = await sync.current(snapshot);
       final playingId = from.currentEntryId;
       if (playingId == null) return;
       final entry = from.queue.entries[from.currentIndex];
@@ -293,7 +318,7 @@ class QueueRig {
   /// The notifier's `_changeGroups`.
   Future<void> run(TestQueue Function(TestQueue queue) change) {
     return sync.exclusive(() async {
-      final from = snapshot;
+      final from = await sync.current(snapshot);
       final target = change(from.queue);
       await sync.apply(from, target,
           commit: (confirmed) => snapshot = confirmed);

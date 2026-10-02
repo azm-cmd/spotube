@@ -1246,4 +1246,97 @@ void main() {
       expect(ids(copies.moveEntryBefore('e1', 'e4')), ['e2', 'e3', 'e1', 'e4']);
     });
   });
+
+  group('moves named by what a row is, not where it is', () {
+    // e1  [G: e2 e3 e4]  e5  e6
+    GroupedQueue<String> queue() => GroupedQueue.ungrouped([
+          for (var i = 1; i <= 6; i++) QueueEntry('e$i', 't$i'),
+        ]).createGroup(groupId: 'G', title: 'g', entryIds: ['e2', 'e3', 'e4']);
+
+    List<String> ids(GroupedQueue<String> q) =>
+        [for (final e in q.entries) e.id];
+
+    test('itemKeyAt names the rows of the top level', () {
+      final q = queue();
+      expect(q.itemKeyAt(0), 'entry:e1');
+      expect(q.itemKeyAt(1), 'group:G');
+      expect(q.itemKeyAt(2), 'entry:e5');
+      expect(q.itemKeyAt(3), 'entry:e6');
+      expect(q.itemKeyAt(4), isNull);
+      expect(q.itemKeyAt(-1), isNull);
+    });
+
+    test('moveItemBefore does what moveItem does for the same rows', () {
+      final q = queue();
+      for (var from = 0; from < 4; from++) {
+        for (var to = 0; to <= 4; to++) {
+          final byKey = q.moveItemBefore(q.itemKeyAt(from)!, q.itemKeyAt(to));
+          final byIndex = (to == from || to == from + 1)
+              ? q
+              : q.moveItem(from, to);
+          expect(ids(byKey), ids(byIndex), reason: '$from -> $to');
+          expect(byKey.groups.map((g) => g.memberIds).toList(),
+              byIndex.groups.map((g) => g.memberIds).toList());
+        }
+      }
+    });
+
+    test('a key still means the same row after other rows moved', () {
+      final q = queue();
+      final dragged = q.itemKeyAt(3)!; // e6, picked up here...
+      final target = q.itemKeyAt(0); // ...to drop before e1
+      // ...but the queue changed before the drop: the group moved to the end.
+      final changed = q.moveItemBefore('group:G', null);
+      expect(changed.itemKeyAt(3), 'group:G'); // the same position, a new row
+      // The index version would now move the group; the key moves e6.
+      expect(ids(changed.moveItemBefore(dragged, target)),
+          ['e6', 'e1', 'e5', 'e2', 'e3', 'e4']);
+    });
+
+    test('moveItemBefore ignores rows that are gone and moves that change '
+        'nothing', () {
+      final q = queue();
+      expect(identical(q.moveItemBefore('entry:gone', 'entry:e1'), q), isTrue);
+      expect(identical(q.moveItemBefore('entry:e1', 'entry:gone'), q), isTrue);
+      expect(identical(q.moveItemBefore('entry:e1', 'entry:e1'), q), isTrue);
+      expect(identical(q.moveItemBefore('entry:e1', 'group:G'), q), isTrue);
+      expect(identical(q.moveItemBefore('entry:e6', null), q), isTrue);
+    });
+
+    test('moveGroupBefore moves the group whole, and needs the group', () {
+      final moved = queue().moveGroupBefore('G', null);
+      expect(ids(moved), ['e1', 'e5', 'e6', 'e2', 'e3', 'e4']);
+      expect(moved.groupById('G')!.memberIds, ['e2', 'e3', 'e4']);
+      expect(() => queue().moveGroupBefore('gone', null),
+          throwsA(isA<QueueGroupError>()));
+    });
+
+    test('moveMemberBefore reorders inside the group by entry id', () {
+      final q = queue();
+      expect(ids(q.moveMemberBefore('G', 'e4', 'e2')),
+          ['e1', 'e4', 'e2', 'e3', 'e5', 'e6']);
+      expect(ids(q.moveMemberBefore('G', 'e2', null)),
+          ['e1', 'e3', 'e4', 'e2', 'e5', 'e6']);
+      expect(q.moveMemberBefore('G', 'e2', null).groupById('G')!.memberIds,
+          ['e3', 'e4', 'e2']);
+    });
+
+    test('moveMemberBefore ignores members that left, and no-op moves', () {
+      final q = queue();
+      expect(identical(q.moveMemberBefore('G', 'e1', 'e2'), q), isTrue);
+      expect(identical(q.moveMemberBefore('G', 'e2', 'gone'), q), isTrue);
+      expect(identical(q.moveMemberBefore('G', 'e2', 'e3'), q), isTrue);
+      expect(identical(q.moveMemberBefore('G', 'e4', null), q), isTrue);
+      expect(() => q.moveMemberBefore('gone', 'e2', null),
+          throwsA(isA<QueueGroupError>()));
+    });
+
+    test('copies of one track are told apart', () {
+      final copies = GroupedQueue.ungrouped([
+        for (var i = 1; i <= 4; i++) QueueEntry('e$i', 'same'),
+      ]);
+      expect(ids(copies.moveItemBefore('entry:e4', 'entry:e2')),
+          ['e1', 'e4', 'e2', 'e3']);
+    });
+  });
 }

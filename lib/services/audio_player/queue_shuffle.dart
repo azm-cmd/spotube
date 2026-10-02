@@ -18,6 +18,8 @@
 /// to when the shuffle is switched off.
 library;
 
+import 'dart:async';
+
 import 'package:spotube/services/audio_player/queue_groups.dart';
 import 'package:spotube/services/audio_player/queue_sync.dart';
 
@@ -165,13 +167,13 @@ class QueueShuffler<T> {
   ///    still restores the remembered order in Dart.
   Future<bool> setShuffle(
     bool shuffle, {
-    required QueueSnapshot<T> Function() read,
+    required FutureOr<QueueSnapshot<T>> Function() read,
     required void Function(QueueSnapshot<T> confirmed) commit,
   }) {
     return sync.exclusive(() async {
       if (shuffle == port.isShuffled) return false;
 
-      final from = read();
+      final from = await read();
       final hasGroups = from.queue.groups.isNotEmpty;
       final inDart = shuffle ? hasGroups : (hasGroups || _doneInDart);
 

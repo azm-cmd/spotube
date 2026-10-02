@@ -254,7 +254,9 @@ void main() {
         final groupKey = 'group:${stateOf(c).groups.single.id}';
         await dragTo(tester,
             from: groupKey, target: 'entry:${ids[5]}', drop: Drop.after);
-        await wait(tester);
+        // (Moving the playing group is the longest chain of replies from mpv,
+        // each of which waits for a frame of this test: more real time.)
+        await wait(tester, 1500);
         expect(shape(stateOf(c)), 'a d e f Road trip+[b,c]');
         expectScreenAndPlayerMatch(c, tester);
         expect(stateOf(c).entryIds[stateOf(c).currentIndex], ids[2]);

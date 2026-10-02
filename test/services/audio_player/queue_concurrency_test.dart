@@ -232,6 +232,127 @@ void main() {
     });
   });
 
+  group('the track ends by itself around a change', () {
+    // The player goes on to the next entry on its own. The app hears about it
+    // a little later, so a change can start (or finish) before it knows.
+
+    test('before the change starts: the entry that plays now is kept',
+        () async {
+      for (final change in <(String, Change)>[
+        ('play next', (r) => r.insert(['x'], afterPlaying: true)),
+        ('group move', (r) => r.run((q) => q.moveGroup('G2', 0))),
+        ('member reorder', (r) => r.run((q) => q.moveWithinGroup('G1', 0, 3))),
+        ('removal', (r) => r.run((q) => q.removeEntries(['e8']))),
+        ('flat move', moveFrom(7, 1)),
+        ('add to queue', (r) => r.insert(['y'])),
+      ]) {
+        final rig = await freshRig(0);
+        rig.mpv.jump(0); // the app has heard where the player is: entry 1
+        rig.mpv.delayedPlayingReports = true;
+
+        rig.mpv.advanceTo(4); // e5 plays now; the report is on its way
+        await change.$2(rig);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        expect(rig.snapshot.currentEntryId, 'e5', reason: change.$1);
+        expect(rig.snapshot.currentIndex, rig.mpv.currentIndex,
+            reason: change.$1);
+        expectConsistent(rig, reason: change.$1);
+      }
+    });
+
+    test(
+        'play next goes after the entry that plays now, not the one the app '
+        'last heard of', () async {
+      for (var next = 1; next < 8; next++) {
+        final rig = await freshRig(0);
+        rig.mpv.jump(0); // the app has heard where the player is: entry 1
+        rig.mpv.delayedPlayingReports = true;
+
+        rig.mpv.advanceTo(next); // the report is still on its way
+        final playing = rig.mpv.playing!.entryId;
+        await rig.insert(['x'], afterPlaying: true);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        // Right after the entry, or after its group.
+        final queue = rig.snapshot.queue;
+        final ids = [for (final e in queue.entries) e.id];
+        final last = queue.groupOf(playing)?.memberIds.last ?? playing;
+        expect(queue.entries[ids.indexOf(last) + 1].track.id, 'x',
+            reason: 'playing $playing');
+        expect(rig.snapshot.currentEntryId, playing);
+        expectConsistent(rig, reason: 'playing $playing');
+      }
+    });
+
+    test('while the change is being sent: the entry that plays now is kept',
+        () async {
+      for (final change in <(String, Change)>[
+        ('play next', (r) => r.insert(['x', 'y'], afterPlaying: true)),
+        ('group move', (r) => r.run((q) => q.moveGroup('G2', 0))),
+        ('member reorder', (r) => r.run((q) => q.moveWithinGroup('G1', 0, 3))),
+        ('removal', (r) => r.run((q) => q.removeEntries(['e8', 'e7']))),
+        ('flat move', moveFrom(7, 1)),
+      ]) {
+        final rig = await freshRig(0);
+        var advanced = false;
+        rig.mpv.gate = (command) async {
+          // The first command of the change is on its way when the track ends.
+          if (!advanced) {
+            advanced = true;
+            rig.mpv.advanceTo(rig.mpv.playlist.length - 1);
+            rig.deliverReport(); // the report arrives in the middle
+          }
+        };
+
+        await change.$2(rig);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        final playing = rig.mpv.playing!.entryId;
+        expect(rig.snapshot.currentEntryId, playing, reason: change.$1);
+        expect(rig.snapshot.currentIndex, rig.mpv.currentIndex,
+            reason: change.$1);
+        expectConsistent(rig, reason: change.$1);
+      }
+    });
+
+    test('right after the change: the entry that plays now is kept', () async {
+      final rig = await freshRig(0);
+      rig.mpv.delayedPlayingReports = true;
+
+      await rig.insert(['x'], afterPlaying: true);
+      rig.mpv.advanceTo(4); // after the insert, position 4 is e4
+      expect(rig.mpv.playing!.entryId, 'e4');
+      await rig.run((q) => q.moveGroup('G2', 0));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(rig.snapshot.currentEntryId, 'e4');
+      expect(rig.snapshot.currentIndex, rig.mpv.currentIndex);
+    });
+
+    test('a track that ends again and again while changes pile up', () async {
+      final rig = await freshRig(0);
+      rig.mpv.delayedPlayingReports = true;
+      slowPlayer(rig, 2);
+      final changes = [
+        rig.insert(['x'], afterPlaying: true),
+        rig.run((q) => q.moveGroup('G1', 5)),
+        rig.insert(['y']),
+        rig.run((q) => q.removeEntries(['e8'])),
+      ];
+      for (var i = 0; i < 4; i++) {
+        await Future<void>.delayed(Duration.zero);
+        rig.mpv.advanceTo((rig.mpv.currentIndex + 1) % rig.mpv.playlist.length);
+      }
+      await Future.wait(changes);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(rig.snapshot.currentEntryId, rig.mpv.playing!.entryId);
+      expect(rig.snapshot.currentIndex, rig.mpv.currentIndex);
+      expectConsistent(rig);
+    });
+  });
+
   group('copies of a track', () {
     // All eight entries are the same track.
     Future<QueueRig> same(int playing) async {

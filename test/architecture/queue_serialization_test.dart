@@ -109,12 +109,25 @@ void main() {
   });
 
   test('a jump holds the lock before it reaches the player', () {
-    for (final name in ['jumpToTrack', 'jumpToEntry', 'jumpToIndex']) {
+    for (final name in ['jumpToTrack', 'jumpToEntry']) {
       final text = methods[name]!;
       expect(text, contains('_sync.exclusive('), reason: name);
       expect(text, contains('_jumpTo('), reason: name);
       expect(text, isNot(contains('audioPlayer.jumpTo(')), reason: name);
     }
+  });
+
+  test('a jump by position names its entry before it waits for the lock', () {
+    // The remote player sends positions. The position is turned into an entry
+    // id when the request arrives; the jump then waits behind the queue
+    // changes already asked for and still plays that entry.
+    final text = methods['jumpToIndex']!;
+    expect(text, contains('state.entryIds'));
+    expect(text, contains('jumpToEntry('));
+    expect(text, isNot(contains('audioPlayer.')));
+    expect(text, isNot(contains('_jumpTo(')));
+    expect(
+        text.indexOf('state.entryIds'), lessThan(text.indexOf('jumpToEntry(')));
   });
 
   test('moving, grouping and removing go through the one change method', () {
@@ -149,6 +162,63 @@ void main() {
         lessThan(move.indexOf('_changeGroups(')));
   });
 
+  test('a drag by position names its rows before it waits for the lock', () {
+    // Positions are turned into what they point at when the request is made;
+    // the change then runs behind the ones already asked for.
+    final expected = {
+      'moveGroup': 'moveGroupBefore(',
+      'moveQueueItem': 'moveItemBefore(',
+      'moveWithinGroup': 'moveMemberBefore(',
+    };
+    expected.forEach((name, call) {
+      final text = methods[name]!;
+      expect(text, contains(call), reason: name);
+      expect(text.indexOf(RegExp(r'_rowAt\(|memberIds')),
+          lessThan(text.indexOf('_changeGroups(')),
+          reason: '$name reads positions after it waited');
+    });
+    final rowAt = source.substring(source.indexOf('_rowAt(int index)'));
+    expect(
+        rowAt.substring(0, rowAt.indexOf('\n  }\n')), contains('itemKeyAt('));
+  });
+
+  test('every change starts from the position the player says it is at', () {
+    // The player's own answer, not the last thing it reported: it may have
+    // moved on by itself (a track that ended) since.
+    for (final name in ['_insertTracks', 'swapActiveSource', '_changeGroups']) {
+      final text = methods[name]!;
+      expect(text, contains('await _sync.current(_snapshot)'), reason: name);
+    }
+    expect(methods['_setShuffle'], contains('_sync.current(_snapshot)'));
+    expect(source, contains('Future<int> queryPlayingIndex()'));
+    final impl = File('lib/services/audio_player/audio_player_impl.dart')
+        .readAsStringSync();
+    final query =
+        impl.substring(impl.indexOf('Future<int> queryPlayingIndex()'));
+    final body = query.substring(0, query.indexOf('\n  }\n'));
+    expect(body, contains("getProperty('playlist-pos')"));
+    // It only looks: nothing in it changes the player.
+    expect(body, isNot(contains('setProperty')));
+    expect(body, isNot(contains('command')));
+  });
+
+  test('the saved queue never replaces a queue that is newer than it', () {
+    // The restore reads the database in the background at startup. Anything
+    // that put a queue in place (or cleared it) before the restore got its
+    // turn must be left alone.
+    expect(source, contains('bool _queueTouched = false;'));
+    for (final name in ['_commitSnapshot', 'load', 'stop']) {
+      expect(methods[name], contains('_queueTouched = true'), reason: name);
+    }
+    final restore = methods['_syncSavedState']!;
+    final lock = restore.indexOf('_sync.exclusive(');
+    final guard = restore.indexOf('if (_queueTouched) return;');
+    expect(guard, greaterThan(lock));
+    expect(guard, lessThan(restore.indexOf('state = state')));
+    expect(guard, lessThan(restore.indexOf('audioPlayer.openPlaylist(')));
+    expect(restore, contains('!_queueTouched'));
+  });
+
   test('the swap of the playing source is one guarded step', () {
     final swap = methods['swapActiveSource']!;
     expect(swap, contains('_sync.exclusive('));
@@ -177,6 +247,38 @@ void main() {
         isFalse,
         reason: '${entity.path} changes the player\'s playlist by itself',
       );
+    }
+  });
+
+  test('mpv is only reached through the audio player service', () {
+    // The player library's own objects: nothing outside the service layer may
+    // hold one, and inside it only the service's implementation file sends
+    // commands that change the playlist or the playing position.
+    final library = RegExp(
+      r'nativePlayer|_mkPlayer|CustomPlayer|package:media_kit/src',
+    );
+    final queueCommands = RegExp(
+      r'_mkPlayer\.(add|insert|remove|move|open|stop|jump|next|previous|'
+      r'setShuffle|shuffle)\(',
+    );
+    final playlistProperties = RegExp(
+      "(setProperty|command)\\(\\s*\\[?\\s*['\"](playlist|loadfile|"
+      "playlist-)",
+    );
+    for (final entity in Directory('lib').listSync(recursive: true)) {
+      if (entity is! File || !entity.path.endsWith('.dart')) continue;
+      final text = entity.readAsStringSync();
+      expect(playlistProperties.hasMatch(text), isFalse,
+          reason: '${entity.path} writes mpv\'s playlist directly');
+      if (entity.path.startsWith('lib/services/audio_player/')) {
+        if (!entity.path.endsWith('audio_player_impl.dart')) {
+          expect(queueCommands.hasMatch(text), isFalse,
+              reason: '${entity.path} sends queue commands to mpv');
+        }
+        continue;
+      }
+      expect(library.hasMatch(text), isFalse,
+          reason: '${entity.path} reaches into the player library');
     }
   });
 
