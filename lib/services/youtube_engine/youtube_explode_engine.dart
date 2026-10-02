@@ -7,6 +7,15 @@ import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'dart:async';
 
+/// Sent back by the worker isolate instead of a result when the request threw,
+/// so the caller can fail instead of waiting for a reply that never comes.
+class _IsolateFailure {
+  final String error;
+  final String stackTrace;
+
+  const _IsolateFailure(this.error, this.stackTrace);
+}
+
 /// It contains methods that are computationally expensive
 class IsolatedYoutubeExplode {
   final Isolate _isolate;
@@ -83,38 +92,71 @@ class IsolatedYoutubeExplode {
         }
       }
 
-      // Run the requested method on YoutubeExplode
-      var result = switch (methodName) {
-        "search" => youtubeExplode.search
-            .search(
+      try {
+        // Run the requested method on YoutubeExplode
+        var result = switch (methodName) {
+          "search" => youtubeExplode.search
+              .search(
+                arguments[0] as String,
+                filter: arguments.elementAtOrNull(1) ?? TypeFilters.video,
+              )
+              .then((s) => s.toList()),
+          "video" => youtubeExplode.videos.get(arguments[0] as String),
+          "manifest" => youtubeExplode.videos.streamsClient.getManifest(
               arguments[0] as String,
-              filter: arguments.elementAtOrNull(1) ?? TypeFilters.video,
-            )
-            .then((s) => s.toList()),
-        "video" => youtubeExplode.videos.get(arguments[0] as String),
-        "manifest" => youtubeExplode.videos.streamsClient.getManifest(
-            arguments[0] as String,
-            requireWatchPage: arguments.elementAtOrNull(1) ?? true,
-            ytClients: arguments.elementAtOrNull(2) as List<YoutubeApiClient>?,
-          ),
-        _ => throw ArgumentError('Invalid method name: $methodName'),
-      };
+              requireWatchPage: arguments.elementAtOrNull(1) ?? true,
+              ytClients:
+                  arguments.elementAtOrNull(2) as List<YoutubeApiClient>?,
+            ),
+          _ => throw ArgumentError('Invalid method name: $methodName'),
+        };
 
-      replyPort.send(await result);
+        replyPort.send(await result);
+      } catch (e, stack) {
+        // An error that escapes this callback is uncaught in the isolate: the
+        // isolate dies and no reply is ever sent, so the caller would wait
+        // forever (and so would every later request).
+        replyPort.send(_IsolateFailure(e.toString(), stack.toString()));
+      }
     });
   }
+
+  /// The longest a request may take before it is given up on. Extraction
+  /// retries failed requests, so this is generous.
+  static const _requestTimeout = Duration(seconds: 60);
 
   Future<T> _runMethod<T>(String methodName, List<dynamic> args) {
     final completer = Completer<T>();
     final responsePort = ReceivePort();
 
     responsePort.listen((message) {
-      completer.complete(message as T);
+      if (message is _IsolateFailure) {
+        completer.completeError(
+          YoutubeExplodeException(
+            'YouTube $methodName failed: ${message.error}',
+          ),
+          StackTrace.fromString(message.stackTrace),
+        );
+      } else {
+        completer.complete(message as T);
+      }
       responsePort.close();
     });
 
     _sendPort.send([responsePort.sendPort, methodName, args]);
-    return completer.future;
+
+    // Whatever else goes wrong (the isolate is gone, ...), the caller gets an
+    // error instead of waiting forever.
+    return completer.future.timeout(
+      _requestTimeout,
+      onTimeout: () {
+        responsePort.close();
+        throw TimeoutException(
+          'YouTube $methodName did not answer',
+          _requestTimeout,
+        );
+      },
+    );
   }
 
   Future<List<Video>> search(
@@ -162,11 +204,7 @@ class YouTubeExplodeEngine implements YouTubeEngine {
     final streamManifest = await _youtubeExplode.manifest(
       videoId,
       requireWatchPage: false,
-      ytClients: [
-        YoutubeApiClient.ios,
-        YoutubeApiClient.androidVr,
-        YoutubeApiClient.android,
-      ],
+      ytClients: [YoutubeApiClient.androidSdkless],
     );
 
     final audioStreams = streamManifest.audioOnly.where(
