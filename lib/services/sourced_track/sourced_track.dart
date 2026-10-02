@@ -13,6 +13,7 @@ import 'package:spotube/provider/metadata_plugin/metadata_plugin_provider.dart';
 import 'package:spotube/services/dio/dio.dart';
 import 'package:spotube/services/logger/logger.dart';
 import 'package:spotube/services/metadata/errors/exceptions.dart';
+import 'package:spotube/services/youtube_engine/stream_probe.dart';
 
 import 'package:spotube/services/sourced_track/exceptions.dart';
 import 'package:spotube/utils/service_utils.dart';
@@ -270,7 +271,7 @@ class SourcedTrack extends BasicSourcedTrack {
       );
 
       stringBuffer.writeln(
-        "[${query.id}] ${res.statusCode} ${source.container} ${source.codec} ${source.bitrate}",
+        "[${query.id}] ${res.statusCode} ${source.container} ${source.codec} ${source.bitrate} ${StreamProbe.describe(source.url)}",
       );
 
       if (res.statusCode! < 400) {
@@ -278,7 +279,7 @@ class SourcedTrack extends BasicSourcedTrack {
       }
     }
 
-    AppLogger.log.d(stringBuffer.toString());
+    AppLogger.log.i('[403probe] refresh HEAD (default Dart UA)\n$stringBuffer');
 
     if (validStreams.isEmpty) {
       validStreams = await audioSource.audioSource.streams(info);

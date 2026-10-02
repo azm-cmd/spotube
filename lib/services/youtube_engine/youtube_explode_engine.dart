@@ -1,6 +1,7 @@
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
+import 'package:spotube/services/youtube_engine/stream_probe.dart';
 import 'package:spotube/services/youtube_engine/youtube_engine.dart';
 // import 'package:youtube_explode_dart/solvers.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
@@ -205,6 +206,11 @@ class YouTubeExplodeEngine implements YouTubeEngine {
       videoId,
       requireWatchPage: false,
       ytClients: [YoutubeApiClient.androidSdkless],
+    );
+
+    StreamProbe.manifest(
+      '[androidSdkless]',
+      streamManifest.audioOnly.map((s) => s.url),
     );
 
     final audioStreams = streamManifest.audioOnly.where(

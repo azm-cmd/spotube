@@ -20,6 +20,7 @@ import 'package:spotube/provider/user_preferences/user_preferences_provider.dart
 import 'package:spotube/services/audio_player/audio_player.dart';
 import 'package:spotube/services/logger/logger.dart';
 import 'package:spotube/services/sourced_track/sourced_track.dart';
+import 'package:spotube/services/youtube_engine/stream_probe.dart';
 import 'package:spotube/utils/service_utils.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
@@ -42,7 +43,9 @@ class ServerPlaybackRoutes {
   AudioPlayerState get playlist => ref.read(audioPlayerProvider);
   final Dio dio;
 
-  ServerPlaybackRoutes(this.ref) : dio = Dio();
+  ServerPlaybackRoutes(this.ref) : dio = Dio() {
+    dio.interceptors.add(StreamProbe.interceptor); // TEMPORARY 403 diagnostics
+  }
 
   Future<String> _getTrackCacheFilePath(SourcedTrack track) async {
     return join(
@@ -180,6 +183,7 @@ class ServerPlaybackRoutes {
         options: options.copyWith(responseType: ResponseType.bytes),
       ),
     ).catchError((e, stack) async {
+      StreamProbe.note('first HEAD failed, refreshing the stream URL');
       AppLogger.reportError(e, stack);
 
       final sourcedTrack = await ref
